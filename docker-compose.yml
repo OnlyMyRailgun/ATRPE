@@ -1,0 +1,43 @@
+version: "3.8"
+services:
+  temporal:
+    image: temporalio/auto-setup:latest
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    environment:
+      - DB=sqlite
+      - SKIP_DEFAULT_NAMESPACE_CREATION=false
+
+  api:
+    build: .
+    command: /usr/local/bin/atrpe-api
+    ports:
+      - "8080:8080"
+    environment:
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      - INTERNAL_SIGNAL_TOKEN=${INTERNAL_SIGNAL_TOKEN:-}
+      - TEMPORAL_HOST_PORT=temporal:7233
+    depends_on:
+      - temporal
+
+  worker:
+    build: .
+    command: /usr/local/bin/atrpe-worker
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-chat}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      - TEMPORAL_HOST_PORT=temporal:7233
+      - TEMPORAL_TASK_QUEUE=${TEMPORAL_TASK_QUEUE:-atrpe-workflow-queue}
+      - INTERNAL_SIGNAL_TOKEN=${INTERNAL_SIGNAL_TOKEN:-}
+      - ARTIFACT_STORE_TYPE=${ARTIFACT_STORE_TYPE:-local}
+      - LOCAL_ARTIFACT_DIR=/data/artifacts
+    volumes:
+      - worker-data:/app/data
+    depends_on:
+      - temporal
+
+volumes:
+  worker-data:
