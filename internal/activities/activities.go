@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/your-org/atrpe/internal/agents"
 	"github.com/your-org/atrpe/internal/artifacts"
@@ -258,7 +259,7 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 	draft := input.Draft
 	body := buildZennMarkdown(draft)
 	repo := a.Config.GitHubIssueRepo
-	branchName := fmt.Sprintf("atrpe/%s", draft.Slug)
+	branchName := fmt.Sprintf("atrpe/%s-%s", draft.Slug, time.Now().Format("0102-1504"))
 
 	// 1. Get main HEAD SHA
 	mainRef, err := a.githubGet(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/ref/heads/main", repo))

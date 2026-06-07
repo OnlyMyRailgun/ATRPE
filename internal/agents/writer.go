@@ -58,7 +58,7 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 	resp, err := a.llm.ChatWithMaxTokens(ctx, []ChatMessage{
 		{Role: "system", Content: todayPrefix() + " " + writerSystemPrompt},
 		{Role: "user", Content: userPrompt},
-	}, 32768)
+	}, 8192)
 	if err != nil {
 		return artifacts.ArticleDraft{}, fmt.Errorf("writer llm call: %w", err)
 	}
@@ -74,7 +74,10 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 		Sections artifacts.ArticleSections `json:"sections"`
 	}
 
-	title := brief.CoreConcepts[0]
+	title := "ATRPE Article"
+	if len(brief.CoreConcepts) > 0 {
+		title = brief.CoreConcepts[0]
+	}
 	if t := extractFirstHeading(resp); t != "" {
 		title = t
 	}
