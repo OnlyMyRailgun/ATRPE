@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/your-org/atrpe/internal/agents"
@@ -64,6 +65,32 @@ func New(cfg *config.Settings, store *knowledge.SQLiteStore, objects objectstore
 
 type DiscoverTopicsResult struct {
 	Candidates []artifacts.TopicCandidate `json:"candidates"`
+}
+
+// ResolveCandidateInput resolves a human-provided selection to a candidate ID.
+// Accepts either a 12-char hex candidate_id or a numeric position ("1", "2", etc).
+type ResolveCandidateInput struct {
+	Selection string `json:"selection"`
+}
+
+type ResolveCandidateResult struct {
+	CandidateID string `json:"candidate_id"`
+}
+
+func (a *Activities) ResolveCandidateID(ctx context.Context, input ResolveCandidateInput) (*ResolveCandidateResult, error) {
+	sel := strings.TrimSpace(input.Selection)
+
+	// If it looks like a position number, resolve from stored candidates
+	if n, err := strconv.Atoi(sel); err == nil && n > 0 {
+		candidates, err := a.Store.ListTopicCandidates(ctx, n)
+		if err != nil || len(candidates) < n {
+			return nil, fmt.Errorf("invalid position %d: %w", n, err)
+		}
+		return &ResolveCandidateResult{CandidateID: candidates[n-1].ID}, nil
+	}
+
+	// Otherwise treat as a direct candidate_id
+	return &ResolveCandidateResult{CandidateID: sel}, nil
 }
 
 func (a *Activities) DiscoverTopics(ctx context.Context) (*DiscoverTopicsResult, error) {

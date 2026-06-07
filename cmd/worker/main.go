@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/your-org/atrpe/internal/activities"
 	"github.com/your-org/atrpe/internal/config"
+	"github.com/your-org/atrpe/internal/github"
 	"github.com/your-org/atrpe/internal/knowledge"
 	"github.com/your-org/atrpe/internal/objectstore"
 	"github.com/your-org/atrpe/internal/workflows"
@@ -62,9 +64,18 @@ func main() {
 	w.RegisterWorkflow(workflows.ArticleWorkflow)
 	w.RegisterActivity(acts.DiscoverTopics)
 	w.RegisterActivity(acts.CreateTopicIssue)
+	w.RegisterActivity(acts.ResolveCandidateID)
 	w.RegisterActivity(acts.ResearchTopic)
 	w.RegisterActivity(acts.DesignArchitecture)
 	w.RegisterActivity(acts.PublishArticle)
+
+	// Start issue poller if GitHub App is configured
+	if acts.GitHub != nil && cfg.GitHubIssueRepo != "" {
+		sender := &temporalSender{client: c}
+		poller := github.NewIssuePoller(acts.GitHub, cfg.GitHubIssueRepo, 1, sender, logger)
+		go poller.Start(context.Background())
+		logger.Info("issue poller started for issue #1")
+	}
 
 	if err := w.Start(); err != nil {
 		logger.Error("worker start failed", "error", err)
@@ -78,4 +89,13 @@ func main() {
 
 	logger.Info("worker shutting down")
 	w.Stop()
+}
+
+// temporalSender implements github.TemporalSignalSender using the Temporal client.
+type temporalSender struct {
+	client client.Client
+}
+
+func (s *temporalSender) SendSignal(ctx context.Context, workflowID, signal string, payload map[string]any) error {
+	return s.client.SignalWorkflow(ctx, workflowID, "", signal, payload)
 }
