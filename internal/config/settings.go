@@ -24,6 +24,9 @@ type Settings struct {
 	InternalSignalToken       string
 	GitHubWebhookSecret       string
 	GitHubToken               string
+	GitHubAppID               int64
+	GitHubAppPrivateKey       string
+	GitHubAppInstallationID   int64
 	GitHubIssueRepo           string
 	ArtifactStoreType         string
 	LocalArtifactDir          string
@@ -55,6 +58,9 @@ func Load() (*Settings, error) {
 		InternalSignalToken:       os.Getenv("INTERNAL_SIGNAL_TOKEN"),
 		GitHubWebhookSecret:       os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubToken:               os.Getenv("GITHUB_TOKEN"),
+		GitHubAppID:               getEnvInt64("GITHUB_APP_ID", 0),
+		GitHubAppPrivateKey:       os.Getenv("GITHUB_APP_PRIVATE_KEY"),
+		GitHubAppInstallationID:   getEnvInt64("GITHUB_APP_INSTALLATION_ID", 0),
 		GitHubIssueRepo:           os.Getenv("GITHUB_ISSUE_REPO"),
 		ArtifactStoreType:         getEnv("ARTIFACT_STORE_TYPE", "local"),
 		LocalArtifactDir:          getEnv("LOCAL_ARTIFACT_DIR", "data/artifacts"),
@@ -95,6 +101,18 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func getEnvInt64(key string, fallback int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return fallback
 	}

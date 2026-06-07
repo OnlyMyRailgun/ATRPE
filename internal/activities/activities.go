@@ -14,6 +14,7 @@ import (
 	"github.com/your-org/atrpe/internal/agents"
 	"github.com/your-org/atrpe/internal/artifacts"
 	"github.com/your-org/atrpe/internal/config"
+	"github.com/your-org/atrpe/internal/github"
 	"github.com/your-org/atrpe/internal/knowledge"
 	"github.com/your-org/atrpe/internal/objectstore"
 	"github.com/your-org/atrpe/internal/topics"
@@ -25,6 +26,7 @@ type Activities struct {
 	Store    *knowledge.SQLiteStore
 	Objects  objectstore.ObjectStore
 	LLM      *agents.LLMClient
+	GitHub   *github.AppClient
 	Research *agents.ResearchAgent
 	Design   *agents.DesignAgent
 }
@@ -37,11 +39,22 @@ func New(cfg *config.Settings, store *knowledge.SQLiteStore, objects objectstore
 		APIKey:   cfg.LLMAPIKey,
 		BaseURL:  cfg.LLMBaseURL,
 	})
+
+	var ghClient *github.AppClient
+	if cfg.GitHubAppID > 0 && cfg.GitHubAppPrivateKey != "" && cfg.GitHubAppInstallationID > 0 {
+		var err error
+		ghClient, err = github.NewAppClient(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, cfg.GitHubAppInstallationID)
+		if err != nil {
+			fmt.Printf("⚠️ GitHub App init failed: %v\n", err)
+		}
+	}
+
 	return &Activities{
 		Config:   cfg,
 		Store:    store,
 		Objects:  objects,
 		LLM:      llm,
+		GitHub:   ghClient,
 		Research: agents.NewResearchAgent(llm),
 		Design:   agents.NewDesignAgent(llm),
 	}
@@ -96,10 +109,16 @@ func (a *Activities) CreateTopicIssue(ctx context.Context, input CreateTopicIssu
 
 	body := sb.String()
 
-	// Try to create a real GitHub issue if token and repo are configured
+	// Try to create a real GitHub issue
 	issueURL := "internal://topic-selection"
-	if a.Config.GitHubToken != "" && a.Config.GitHubIssueRepo != "" {
-		url, err := createGitHubIssue(ctx, a.Config.GitHubToken, a.Config.GitHubIssueRepo, "ATRPE Topic Candidates", body)
+	if a.Config.GitHubIssueRepo != "" {
+		var url string
+		var err error
+		if a.GitHub != nil {
+			url, err = a.createIssueViaApp(ctx, "ATRPE Topic Candidates", body)
+		} else if a.Config.GitHubToken != "" {
+			url, err = createGitHubIssue(ctx, a.Config.GitHubToken, a.Config.GitHubIssueRepo, "ATRPE Topic Candidates", body)
+		}
 		if err != nil {
 			fmt.Printf("⚠️ GitHub issue creation failed: %v\nFalling back to log output.\n\n%s\n", err, body)
 		} else {
@@ -113,7 +132,38 @@ func (a *Activities) CreateTopicIssue(ctx context.Context, input CreateTopicIssu
 	return &CreateTopicIssueResult{IssueURL: issueURL}, nil
 }
 
-// createGitHubIssue calls the GitHub API to create an issue.
+// createIssueViaApp creates an issue using the GitHub App client.
+func (a *Activities) createIssueViaApp(ctx context.Context, title, body string) (string, error) {
+	return createGitHubIssueViaClient(ctx, a.GitHub, a.Config.GitHubIssueRepo, title, body)
+}
+
+// createGitHubIssueViaClient uses an AppClient to create a GitHub issue.
+func createGitHubIssueViaClient(ctx context.Context, client *github.AppClient, repo, title, body string) (string, error) {
+	payload := map[string]string{"title": title, "body": body}
+	b, _ := json.Marshal(payload)
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/issues", repo)
+	resp, err := client.PostJSON(url, string(b))
+	if err != nil {
+		return "", fmt.Errorf("api call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	return result.HTMLURL, nil
+}
+
+// createGitHubIssue calls the GitHub API to create an issue (PAT fallback).
 func createGitHubIssue(ctx context.Context, token, repo, title, body string) (string, error) {
 	payload := map[string]string{"title": title, "body": body}
 	b, _ := json.Marshal(payload)
