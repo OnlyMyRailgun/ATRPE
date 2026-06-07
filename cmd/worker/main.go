@@ -77,9 +77,9 @@ func main() {
 	// Start issue poller if GitHub App is configured
 	if acts.GitHub != nil && cfg.GitHubIssueRepo != "" {
 		sender := &temporalSender{client: c}
-		poller := github.NewIssuePoller(acts.GitHub, cfg.GitHubIssueRepo, 3, sender, logger)
+		poller := github.NewIssuePoller(acts.GitHub, cfg.GitHubIssueRepo, sender, logger)
 		go poller.Start(context.Background())
-		logger.Info("issue poller started for issue #1")
+		logger.Info("issue poller started — watching all open issues")
 	}
 
 	if err := w.Start(); err != nil {

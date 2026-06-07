@@ -119,7 +119,8 @@ type CreateTopicIssueInput struct {
 }
 
 type CreateTopicIssueResult struct {
-	IssueURL string `json:"issue_url"`
+	IssueURL    string `json:"issue_url"`
+	IssueNumber int    `json:"issue_number"`
 }
 
 func (a *Activities) CreateTopicIssue(ctx context.Context, input CreateTopicIssueInput) (*CreateTopicIssueResult, error) {
@@ -153,12 +154,12 @@ func (a *Activities) CreateTopicIssue(ctx context.Context, input CreateTopicIssu
 		} else {
 			issueURL = url
 			fmt.Printf("✅ Topic selection issue created: %s\n", url)
-			return &CreateTopicIssueResult{IssueURL: issueURL}, nil
+			return &CreateTopicIssueResult{IssueURL: issueURL, IssueNumber: extractIssueNumber(issueURL)}, nil
 		}
 	}
 
 	fmt.Printf("\n=== TOPIC SELECTION ISSUE ===\n%s=== END ===\n", body)
-	return &CreateTopicIssueResult{IssueURL: issueURL}, nil
+	return &CreateTopicIssueResult{IssueURL: issueURL, IssueNumber: extractIssueNumber(issueURL)}, nil
 }
 
 // -- Post Comment --
@@ -345,6 +346,18 @@ func (a *Activities) githubPut(ctx context.Context, url, payload string) ([]byte
 		return nil, fmt.Errorf("GitHub PUT error %d: %s", resp.StatusCode, string(body))
 	}
 	return body, nil
+}
+
+func extractIssueNumber(url string) int {
+	// URL format: https://github.com/owner/repo/issues/N
+	parts := strings.Split(url, "/")
+	if len(parts) > 0 {
+		last := parts[len(parts)-1]
+		if n, err := strconv.Atoi(last); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // createIssueViaApp creates an issue using the GitHub App client.

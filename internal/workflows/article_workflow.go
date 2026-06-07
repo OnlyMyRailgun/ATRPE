@@ -159,9 +159,18 @@ func runDiscover(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 		return s
 	}
 
+	var issueResult struct {
+		IssueURL    string `json:"issue_url"`
+		IssueNumber int    `json:"issue_number"`
+	}
 	err = workflow.ExecuteActivity(ctx, "CreateTopicIssue", map[string]interface{}{
 		"candidates": discoverResult.Candidates,
-	}).Get(ctx, nil)
+	}).Get(ctx, &issueResult)
+
+	// Use the real issue number if available
+	if issueResult.IssueNumber > 0 {
+		s.IssueNumber = issueResult.IssueNumber
+	}
 	if err != nil {
 		workflow.GetLogger(ctx).Warn("CreateTopicIssue failed", "error", err)
 	}
