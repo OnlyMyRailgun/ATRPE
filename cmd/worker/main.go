@@ -64,9 +64,14 @@ func main() {
 	w.RegisterWorkflow(workflows.ArticleWorkflow)
 	w.RegisterActivity(acts.DiscoverTopics)
 	w.RegisterActivity(acts.CreateTopicIssue)
+	w.RegisterActivity(acts.PostComment)
 	w.RegisterActivity(acts.ResolveCandidateID)
 	w.RegisterActivity(acts.ResearchTopic)
 	w.RegisterActivity(acts.DesignArchitecture)
+	w.RegisterActivity(acts.RunExperiment)
+	w.RegisterActivity(acts.VerifyExperiment)
+	w.RegisterActivity(acts.GenerateDraft)
+	w.RegisterActivity(acts.CreateArticlePR)
 	w.RegisterActivity(acts.PublishArticle)
 
 	// Start issue poller if GitHub App is configured

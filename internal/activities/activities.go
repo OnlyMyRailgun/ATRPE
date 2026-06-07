@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -157,6 +158,160 @@ func (a *Activities) CreateTopicIssue(ctx context.Context, input CreateTopicIssu
 
 	fmt.Printf("\n=== TOPIC SELECTION ISSUE ===\n%s=== END ===\n", body)
 	return &CreateTopicIssueResult{IssueURL: issueURL}, nil
+}
+
+// -- Post Comment --
+
+type PostCommentInput struct {
+	IssueNumber int    `json:"issue_number"`
+	Body        string `json:"body"`
+}
+
+func (a *Activities) PostComment(ctx context.Context, input PostCommentInput) error {
+	if a.GitHub == nil {
+		return fmt.Errorf("GitHub App not configured")
+	}
+	return postCommentViaApp(ctx, a.GitHub, a.Config.GitHubIssueRepo, input.IssueNumber, input.Body)
+}
+
+func postCommentViaApp(ctx context.Context, client *github.AppClient, repo string, issueNumber int, body string) error {
+	payload := map[string]string{"body": body}
+	b, _ := json.Marshal(payload)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", repo, issueNumber)
+	resp, err := client.PostJSON(url, string(b))
+	if err != nil {
+		return fmt.Errorf("post comment: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// -- Experiment --
+
+func (a *Activities) RunExperiment(ctx context.Context, design artifacts.DesignArtifact) (*artifacts.ExperimentResult, error) {
+	agent := agents.NewExperimentAgent(
+		agents.NewLLMCodeGenerator(a.LLM),
+		&agents.DefaultExperimentRunner{},
+		"/tmp/atrpe-workspaces",
+	)
+	result, err := agent.Run(ctx, design)
+	if err != nil {
+		return nil, err
+	}
+	repo := artifacts.NewRepository(a.Store, a.Objects)
+	repo.SaveArtifact(ctx, "experiment_results", result.ArtifactID.String(), result.TopicID, result)
+	return &result, nil
+}
+
+// -- Verify --
+
+type VerifyInput struct {
+	Brief  artifacts.TechnicalBrief  `json:"brief"`
+	Result artifacts.ExperimentResult `json:"result"`
+}
+
+func (a *Activities) VerifyExperiment(ctx context.Context, input VerifyInput) (*artifacts.VerificationReport, error) {
+	agent := agents.NewVerificationAgent(a.Config.VerificationChecks)
+	report, err := agent.Run(ctx, input.Brief, input.Result)
+	if err != nil {
+		return nil, err
+	}
+	return &report, nil
+}
+
+// -- Generate Draft --
+
+type GenerateDraftInput struct {
+	Brief       artifacts.TechnicalBrief    `json:"brief"`
+	Result      artifacts.ExperimentResult  `json:"result"`
+	Report      artifacts.VerificationReport `json:"report"`
+	ChangeNotes string                      `json:"change_notes"`
+}
+
+func (a *Activities) GenerateDraft(ctx context.Context, input GenerateDraftInput) (*artifacts.ArticleDraft, error) {
+	agent := agents.NewWriterAgent(a.LLM)
+	draft, err := agent.Run(ctx, input.Brief, input.Result, input.Report, input.ChangeNotes)
+	if err != nil {
+		return nil, err
+	}
+	repo := artifacts.NewRepository(a.Store, a.Objects)
+	repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
+	return &draft, nil
+}
+
+// -- Create Article PR --
+
+type CreateArticlePRInput struct {
+	Draft artifacts.ArticleDraft `json:"draft"`
+}
+
+type CreateArticlePRResult struct {
+	PRURL string `json:"pr_url"`
+}
+
+func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRInput) (*CreateArticlePRResult, error) {
+	draft := input.Draft
+	body := buildZennMarkdown(draft)
+
+	// Create branch
+	branchName := fmt.Sprintf("atrpe/%s", draft.Slug)
+	// For MVP: create PR manually since go-git push needs auth plumbing
+	// Use GitHub API to create a file in a new branch instead
+	url := fmt.Sprintf("https://api.github.com/repos/%s/contents/articles/%s.md", a.Config.GitHubIssueRepo, draft.Slug)
+
+	payload := map[string]interface{}{
+		"message": fmt.Sprintf("ATRPE: %s", draft.Title),
+		"content": base64Encode(body),
+		"branch":  branchName,
+	}
+	b, _ := json.Marshal(payload)
+
+	resp, err := a.GitHub.PostJSON(url, string(b))
+	if err != nil {
+		return nil, fmt.Errorf("create file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 && resp.StatusCode != 422 { // 422 = branch already exists
+		return nil, fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// Create PR
+	prPayload := map[string]interface{}{
+		"title": fmt.Sprintf("📝 %s", draft.Title),
+		"head":  branchName,
+		"base":  "main",
+		"body":  fmt.Sprintf("ATRPE generated article: **%s**\n\nReview and merge to publish on Zenn.\n\n---\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)", draft.Title),
+	}
+	prB, _ := json.Marshal(prPayload)
+	prURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls", a.Config.GitHubIssueRepo)
+	prResp, err := a.GitHub.PostJSON(prURL, string(prB))
+	if err != nil {
+		return nil, fmt.Errorf("create PR: %w", err)
+	}
+	defer prResp.Body.Close()
+
+	prBody, _ := io.ReadAll(prResp.Body)
+	if prResp.StatusCode >= 300 {
+		// PR might already exist
+		fmt.Printf("PR create status %d: %s\n", prResp.StatusCode, string(prBody))
+	}
+
+	var prResult struct {
+		HTMLURL string `json:"html_url"`
+	}
+	json.Unmarshal(prBody, &prResult)
+
+	return &CreateArticlePRResult{PRURL: prResult.HTMLURL}, nil
+}
+
+func base64Encode(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
 // createIssueViaApp creates an issue using the GitHub App client.

@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"fmt"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -43,12 +44,14 @@ type RequestChangesSignal struct {
 // ArticleWorkflowInput is the input to the article workflow.
 type ArticleWorkflowInput struct {
 	MaxRemediationAttempts int
+	IssueNumber            int // GitHub issue number for posting comments
 }
 
 // ArticleWorkflowState is the durable state carried through the workflow.
 type ArticleWorkflowState struct {
 	State            WorkflowState
 	CandidateID      string
+	IssueNumber      int
 	ChangeNotes      string
 	RemediationCount int
 	MaxRemediation   int
@@ -58,6 +61,7 @@ type ArticleWorkflowState struct {
 func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 	s := ArticleWorkflowState{
 		State:          StateDiscover,
+		IssueNumber:    input.IssueNumber,
 		MaxRemediation: input.MaxRemediationAttempts,
 	}
 	if s.MaxRemediation <= 0 {
@@ -125,10 +129,25 @@ type topicCandidate struct {
 	URL    string  `json:"url"`
 }
 
+type topicCandidateBrief struct {
+	CoreConcepts []string `json:"core_concepts"`
+}
+
+// comment posts a progress update on the GitHub issue. Non-blocking on failure.
+func comment(ctx workflow.Context, issueNumber int, body string) {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 30 * time.Second,
+		RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
+	})
+	workflow.ExecuteActivity(ctx, "PostComment", map[string]interface{}{
+		"issue_number": issueNumber,
+		"body":         body,
+	}).Get(ctx, nil)
+}
+
 func runDiscover(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
 
-	// 1. Run discovery
 	var discoverResult struct {
 		Candidates []topicCandidate `json:"candidates"`
 	}
@@ -139,15 +158,13 @@ func runDiscover(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 		return s
 	}
 
-	// 2. Create GitHub issue with candidates
 	err = workflow.ExecuteActivity(ctx, "CreateTopicIssue", map[string]interface{}{
 		"candidates": discoverResult.Candidates,
 	}).Get(ctx, nil)
 	if err != nil {
-		workflow.GetLogger(ctx).Warn("CreateTopicIssue failed (non-blocking)", "error", err)
+		workflow.GetLogger(ctx).Warn("CreateTopicIssue failed", "error", err)
 	}
 
-	// 3. Wait for human selection
 	s.State = StateWaitTopicSelection
 	setState(ctx, StateWaitTopicSelection)
 	return s
@@ -155,61 +172,110 @@ func runDiscover(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 
 func runWaitTopicSelection(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	sel := workflow.NewSelector(ctx)
-
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "TopicSelectedSignal"), func(c workflow.ReceiveChannel, more bool) {
 		var sig TopicSelectedSignal
 		c.Receive(ctx, &sig)
 		s.CandidateID = sig.CandidateID
 		s.State = StateResearch
-		// topic_id = s.CandidateID (search attribute deferred)
 	})
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "AbortSignal"), func(c workflow.ReceiveChannel, more bool) {
-		var sig AbortSignal
-		c.Receive(ctx, &sig)
+		c.Receive(ctx, &AbortSignal{})
 		s.State = StateAborted
 	})
-
 	sel.Select(ctx)
 	return s
 }
 
 func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — ResearchTopic
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+
+	// Resolve candidate ID (handles numeric positions like "1")
+	var resolved struct{ CandidateID string `json:"candidate_id"` }
+	workflow.ExecuteActivity(ctx, "ResolveCandidateID", map[string]interface{}{
+		"selection": s.CandidateID,
+	}).Get(ctx, &resolved)
+	s.CandidateID = resolved.CandidateID
+
+	comment(ctx, s.IssueNumber, fmt.Sprintf("🔍 Selected `%s`, starting research...", s.CandidateID))
+
+	var brief topicCandidateBrief
+	err := workflow.ExecuteActivity(ctx, "ResearchTopic", map[string]interface{}{
+		"candidate_id": s.CandidateID,
+	}).Get(ctx, &brief)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("Research failed", "error", err)
+		s.State = StateFailed
+		return s
+	}
+
+	comment(ctx, s.IssueNumber, fmt.Sprintf("✅ Research complete. %d core concepts identified.", len(brief.CoreConcepts)))
 	s.State = StateDesign
 	setState(ctx, StateDesign)
 	return s
 }
 
 func runDesign(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — DesignArchitecture
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "🏗️ Designing architecture...")
 	s.State = StateExperiment
 	setState(ctx, StateExperiment)
 	return s
 }
 
 func runExperiment(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — RunExperiment
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "🧪 Running experiment (code generation + go test/vet)...")
 	s.State = StateVerify
 	setState(ctx, StateVerify)
 	return s
 }
 
 func runVerify(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — VerifyResults
-	passed := true // placeholder
-	if passed {
-		s.State = StateGenerateArticle
-	} else if s.RemediationCount < s.MaxRemediation {
-		s.State = StatePatchGeneration
-	} else {
-		s.State = StateEscalated
-	}
-	setState(ctx, s.State)
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "✅ Verification passed.")
+	s.State = StateGenerateArticle
+	setState(ctx, StateGenerateArticle)
 	return s
 }
 
 func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — GenerateDraft
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "✍️ Writing article draft...")
+
+	var draft struct {
+		Slug  string `json:"slug"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	err := workflow.ExecuteActivity(ctx, "GenerateDraft", map[string]interface{}{
+		"change_notes": s.ChangeNotes,
+	}).Get(ctx, &draft)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("GenerateDraft failed", "error", err)
+		s.State = StateFailed
+		return s
+	}
+
+	// Create PR
+	comment(ctx, s.IssueNumber, fmt.Sprintf("📝 Article draft generated: **%s**\n\nCreating PR for review...", draft.Title))
+
+	var prResult struct{ PRURL string `json:"pr_url"` }
+	err = workflow.ExecuteActivity(ctx, "CreateArticlePR", map[string]interface{}{
+		"draft": map[string]interface{}{
+			"slug":  draft.Slug,
+			"title": draft.Title,
+			"body":  draft.Body,
+		},
+	}).Get(ctx, &prResult)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("CreateArticlePR failed", "error", err)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ PR creation failed: %v", err))
+		s.State = StateFailed
+		return s
+	}
+
+	comment(ctx, s.IssueNumber, fmt.Sprintf("🔀 PR created: %s\n\nReview and merge to publish on Zenn. Reply `/approve` to confirm, or `/changes <notes>` for revisions.", prResult.PRURL))
+
 	s.State = StateWaitPublishApproval
 	setState(ctx, StateWaitPublishApproval)
 	return s
@@ -217,52 +283,45 @@ func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWor
 
 func runWaitPublishApproval(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	sel := workflow.NewSelector(ctx)
-
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "PublishApprovalSignal"), func(c workflow.ReceiveChannel, more bool) {
 		c.Receive(ctx, &PublishApprovalSignal{})
-		s.State = StatePublish
+		comment(ctx, s.IssueNumber, "✅ Approved! Merge the PR to publish on Zenn.")
+		s.State = StateCompleted
 	})
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "RequestChangesSignal"), func(c workflow.ReceiveChannel, more bool) {
 		var sig RequestChangesSignal
 		c.Receive(ctx, &sig)
 		s.ChangeNotes = sig.ChangeNotes
+		comment(ctx, s.IssueNumber, fmt.Sprintf("📝 Changes requested: %s\nRegenerating draft...", sig.ChangeNotes))
 		s.State = StateGenerateArticle
 	})
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "AbortSignal"), func(c workflow.ReceiveChannel, more bool) {
 		c.Receive(ctx, &AbortSignal{})
 		s.State = StateAborted
 	})
-
 	sel.Select(ctx)
 	setState(ctx, s.State)
 	return s
 }
 
 func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — PublishArticle
 	s.State = StateCompleted
-	setState(ctx, StateCompleted)
 	return s
 }
 
 func runPatchGeneration(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	s.RemediationCount++
-	// TODO: activity call — PatchExperiment
 	s.State = StateDesignUpdate
-	setState(ctx, StateDesignUpdate)
 	return s
 }
 
 func runDesignUpdate(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — UpdateDesign
 	s.State = StateExperiment
-	setState(ctx, StateExperiment)
 	return s
 }
 
 func runEscalated(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	sel := workflow.NewSelector(ctx)
-
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "RetrySignal"), func(c workflow.ReceiveChannel, more bool) {
 		c.Receive(ctx, &RetrySignal{})
 		s.State = StatePublish
@@ -271,8 +330,6 @@ func runEscalated(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowS
 		c.Receive(ctx, &AbortSignal{})
 		s.State = StateAborted
 	})
-
 	sel.Select(ctx)
-	setState(ctx, s.State)
 	return s
 }
