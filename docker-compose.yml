@@ -1,13 +1,24 @@
-version: "3.8"
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+
   temporal:
     image: temporalio/auto-setup:latest
     ports:
       - "7233:7233"
       - "8233:8233"
     environment:
-      - DB=sqlite
-      - SKIP_DEFAULT_NAMESPACE_CREATION=false
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgres
+    depends_on:
+      - postgres
 
   api:
     build: .
@@ -18,8 +29,6 @@ services:
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       - INTERNAL_SIGNAL_TOKEN=${INTERNAL_SIGNAL_TOKEN:-}
       - TEMPORAL_HOST_PORT=temporal:7233
-    depends_on:
-      - temporal
 
   worker:
     build: .
@@ -36,8 +45,6 @@ services:
       - LOCAL_ARTIFACT_DIR=/data/artifacts
     volumes:
       - worker-data:/app/data
-    depends_on:
-      - temporal
 
 volumes:
   worker-data:
