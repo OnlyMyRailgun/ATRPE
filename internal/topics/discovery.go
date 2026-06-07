@@ -17,7 +17,10 @@ import (
 func DiscoverGitHubTrending(ctx context.Context, baseURL string) ([]artifacts.TopicCandidate, error) {
 	// Two years back — newer repos are less likely to be over-covered.
 	twoYearsAgo := time.Now().AddDate(-2, 0, 0).Format("2006-01-02")
-	q := fmt.Sprintf("language:go+created:>%s+stars:100..5000", twoYearsAgo)
+	// Focus on AI/MLOps/LLM repos via keyword search in description
+	// This surfaces MCP servers, LLM agents, inference infra, RAG tools, etc.
+	keywords := "(llm+OR+agent+OR+mcp+OR+rag+OR+inference+OR+embedding+OR+deepseek+OR+ollama+OR+prompt+OR+vector+OR+mlops)"
+	q := fmt.Sprintf("language:go+created:>%s+stars:>20+%s+in:name,description", twoYearsAgo, keywords)
 	url := baseURL + "/search/repositories?q=" + q + "&sort=updated&order=desc&per_page=20"
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)

@@ -39,7 +39,7 @@ func (a *ResearchAgent) Run(ctx context.Context, topic artifacts.TopicCandidate)
 	userPrompt := fmt.Sprintf("Research this topic: %s\nURL: %s\nSource: %s", topic.Title, topic.URL, topic.Source)
 
 	resp, err := a.llm.Chat(ctx, []ChatMessage{
-		{Role: "system", Content: researchSystemPrompt},
+		{Role: "system", Content: todayPrefix() + " " + researchSystemPrompt},
 		{Role: "user", Content: userPrompt},
 	})
 	if err != nil {

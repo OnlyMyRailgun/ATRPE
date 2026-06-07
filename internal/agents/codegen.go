@@ -52,7 +52,7 @@ func (g *LLMCodeGenerator) GenerateGoModule(ctx context.Context, design artifact
 	userPrompt := fmt.Sprintf("Generate a Go module for this design:\n%s", string(designJSON))
 
 	resp, err := g.llm.ChatWithMaxTokens(ctx, []ChatMessage{
-		{Role: "system", Content: codegenSystemPrompt},
+		{Role: "system", Content: todayPrefix() + " " + codegenSystemPrompt},
 		{Role: "user", Content: userPrompt},
 	}, 16384)
 	if err != nil {

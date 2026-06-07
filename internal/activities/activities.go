@@ -256,62 +256,92 @@ type CreateArticlePRResult struct {
 func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRInput) (*CreateArticlePRResult, error) {
 	draft := input.Draft
 	body := buildZennMarkdown(draft)
-
-	// Create branch
+	repo := a.Config.GitHubIssueRepo
 	branchName := fmt.Sprintf("atrpe/%s", draft.Slug)
-	// For MVP: create PR manually since go-git push needs auth plumbing
-	// Use GitHub API to create a file in a new branch instead
-	url := fmt.Sprintf("https://api.github.com/repos/%s/contents/articles/%s.md", a.Config.GitHubIssueRepo, draft.Slug)
 
-	payload := map[string]interface{}{
+	// 1. Get main HEAD SHA
+	mainRef, err := a.githubGet(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/ref/heads/main", repo))
+	if err != nil {
+		return nil, fmt.Errorf("get main ref: %w", err)
+	}
+	var ref struct{ Object struct{ SHA string `json:"sha"` } `json:"object"` }
+	json.Unmarshal(mainRef, &ref)
+
+	// 2. Create branch from main
+	createRefPayload := fmt.Sprintf(`{"ref":"refs/heads/%s","sha":"%s"}`, branchName, ref.Object.SHA)
+	_, err = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), createRefPayload)
+	if err != nil {
+		// Branch might already exist — that's ok
+		fmt.Printf("Branch creation note: %v\n", err)
+	}
+
+	// 3. Write article file
+	filePayload := map[string]string{
 		"message": fmt.Sprintf("ATRPE: %s", draft.Title),
-		"content": base64Encode(body),
+		"content": base64.StdEncoding.EncodeToString([]byte(body)),
 		"branch":  branchName,
 	}
-	b, _ := json.Marshal(payload)
-
-	resp, err := a.GitHub.PostJSON(url, string(b))
+	fileB, _ := json.Marshal(filePayload)
+	_, err = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/articles/%s.md", repo, draft.Slug), string(fileB))
 	if err != nil {
-		return nil, fmt.Errorf("create file: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 && resp.StatusCode != 422 { // 422 = branch already exists
-		return nil, fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("write article file: %w", err)
 	}
 
-	// Create PR
-	prPayload := map[string]interface{}{
-		"title": fmt.Sprintf("📝 %s", draft.Title),
-		"head":  branchName,
-		"base":  "main",
-		"body":  fmt.Sprintf("ATRPE generated article: **%s**\n\nReview and merge to publish on Zenn.\n\n---\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)", draft.Title),
-	}
-	prB, _ := json.Marshal(prPayload)
-	prURL := fmt.Sprintf("https://api.github.com/repos/%s/pulls", a.Config.GitHubIssueRepo)
-	prResp, err := a.GitHub.PostJSON(prURL, string(prB))
+	// 4. Create PR
+	prPayload := fmt.Sprintf(`{"title":"📝 %s","head":"%s","base":"main","body":"ATRPE generated article: **%s**\n\nReview and merge to publish on Zenn.\n\n---\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)"}`, draft.Title, branchName, draft.Title)
+	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), prPayload)
 	if err != nil {
 		return nil, fmt.Errorf("create PR: %w", err)
 	}
-	defer prResp.Body.Close()
 
-	prBody, _ := io.ReadAll(prResp.Body)
-	if prResp.StatusCode >= 300 {
-		// PR might already exist
-		fmt.Printf("PR create status %d: %s\n", prResp.StatusCode, string(prBody))
-	}
-
-	var prResult struct {
-		HTMLURL string `json:"html_url"`
-	}
-	json.Unmarshal(prBody, &prResult)
+	var prResult struct{ HTMLURL string `json:"html_url"` }
+	json.Unmarshal(prResp, &prResult)
 
 	return &CreateArticlePRResult{PRURL: prResult.HTMLURL}, nil
 }
 
-func base64Encode(s string) string {
-	return base64.StdEncoding.EncodeToString([]byte(s))
+func (a *Activities) githubGet(ctx context.Context, url string) ([]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := a.GitHub.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub GET error %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+func (a *Activities) githubPost(ctx context.Context, url, payload string) ([]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.GitHub.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub POST error %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+func (a *Activities) githubPut(ctx context.Context, url, payload string) ([]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, "PUT", url, strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.GitHub.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GitHub PUT error %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
 // createIssueViaApp creates an issue using the GitHub App client.

@@ -47,7 +47,7 @@ func (a *DesignAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief) (
 	userPrompt := fmt.Sprintf("Design an example architecture for this technical brief:\n%s", string(briefJSON))
 
 	resp, err := a.llm.Chat(ctx, []ChatMessage{
-		{Role: "system", Content: designSystemPrompt},
+		{Role: "system", Content: todayPrefix() + " " + designSystemPrompt},
 		{Role: "user", Content: userPrompt},
 	})
 	if err != nil {
@@ -99,7 +99,7 @@ func (a *DesignAgent) Update(ctx context.Context, design artifacts.DesignArtifac
 	userPrompt := fmt.Sprintf("Original design:\n%s\n\nPatch result (code changes applied):\n%s\n\nUpdate the design to reflect the code fixes.", string(designJSON), string(patchJSON))
 
 	resp, err := a.llm.Chat(ctx, []ChatMessage{
-		{Role: "system", Content: designSystemPrompt},
+		{Role: "system", Content: todayPrefix() + " " + designSystemPrompt},
 		{Role: "user", Content: userPrompt},
 	})
 	if err != nil {

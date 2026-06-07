@@ -138,3 +138,8 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// todayPrefix returns "Today's date is YYYY-MM-DD." for prompt injection.
+func todayPrefix() string {
+	return "Today's date is " + time.Now().Format("2006-01-02") + "."
+}

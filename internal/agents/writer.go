@@ -56,7 +56,7 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 	}
 
 	resp, err := a.llm.ChatWithMaxTokens(ctx, []ChatMessage{
-		{Role: "system", Content: writerSystemPrompt},
+		{Role: "system", Content: todayPrefix() + " " + writerSystemPrompt},
 		{Role: "user", Content: userPrompt},
 	}, 32768)
 	if err != nil {

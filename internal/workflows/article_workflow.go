@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -217,24 +218,42 @@ func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 func runDesign(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
 	comment(ctx, s.IssueNumber, "🏗️ Designing architecture...")
+
+	var design struct {
+		Components []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"components"`
+	}
+	err := workflow.ExecuteActivity(ctx, "DesignArchitecture", map[string]interface{}{
+		"brief": map[string]interface{}{"topic_id": s.CandidateID},
+	}).Get(ctx, &design)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("DesignArchitecture failed", "error", err)
+		s.State = StateFailed
+		return s
+	}
+
+	names := make([]string, len(design.Components))
+	for i, c := range design.Components {
+		names[i] = fmt.Sprintf("%s (%s)", c.Name, c.Type)
+	}
+	comment(ctx, s.IssueNumber, fmt.Sprintf("🏗️ Design ready: %d components — %s", len(design.Components), strings.Join(names, ", ")))
 	s.State = StateExperiment
 	setState(ctx, StateExperiment)
 	return s
 }
 
 func runExperiment(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
-	comment(ctx, s.IssueNumber, "🧪 Running experiment (code generation + go test/vet)...")
-	s.State = StateVerify
-	setState(ctx, StateVerify)
+	// MVP: skip experiment, go straight to article generation
+	comment(ctx, s.IssueNumber, "🧪 Experiment skipped (MVP), proceeding to article generation...")
+	s.State = StateGenerateArticle
+	setState(ctx, StateGenerateArticle)
 	return s
 }
 
 func runVerify(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
-	comment(ctx, s.IssueNumber, "✅ Verification passed.")
 	s.State = StateGenerateArticle
-	setState(ctx, StateGenerateArticle)
 	return s
 }
 
