@@ -23,6 +23,8 @@ type Settings struct {
 	TemporalTaskQueue         string
 	InternalSignalToken       string
 	GitHubWebhookSecret       string
+	GitHubToken               string
+	GitHubIssueRepo           string
 	ArtifactStoreType         string
 	LocalArtifactDir          string
 	R2Bucket                  string
@@ -52,6 +54,8 @@ func Load() (*Settings, error) {
 		TemporalTaskQueue:         getEnv("TEMPORAL_TASK_QUEUE", "atrpe-workflow-queue"),
 		InternalSignalToken:       os.Getenv("INTERNAL_SIGNAL_TOKEN"),
 		GitHubWebhookSecret:       os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		GitHubToken:               os.Getenv("GITHUB_TOKEN"),
+		GitHubIssueRepo:           os.Getenv("GITHUB_ISSUE_REPO"),
 		ArtifactStoreType:         getEnv("ARTIFACT_STORE_TYPE", "local"),
 		LocalArtifactDir:          getEnv("LOCAL_ARTIFACT_DIR", "data/artifacts"),
 		R2Bucket:                  os.Getenv("R2_BUCKET"),

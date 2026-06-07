@@ -116,8 +116,38 @@ func defaultActivityOptions() workflow.ActivityOptions {
 
 // State handler stubs — to be wired to activities in Week 2
 
+// topicCandidate is a lightweight copy of the activity result for JSON deserialization.
+type topicCandidate struct {
+	ID     string  `json:"id"`
+	Title  string  `json:"title"`
+	Score  float64 `json:"score"`
+	Source string  `json:"source"`
+	URL    string  `json:"url"`
+}
+
 func runDiscover(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// TODO: activity call — DiscoverTopics
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+
+	// 1. Run discovery
+	var discoverResult struct {
+		Candidates []topicCandidate `json:"candidates"`
+	}
+	err := workflow.ExecuteActivity(ctx, "DiscoverTopics").Get(ctx, &discoverResult)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("DiscoverTopics failed", "error", err)
+		s.State = StateFailed
+		return s
+	}
+
+	// 2. Create GitHub issue with candidates
+	err = workflow.ExecuteActivity(ctx, "CreateTopicIssue", map[string]interface{}{
+		"candidates": discoverResult.Candidates,
+	}).Get(ctx, nil)
+	if err != nil {
+		workflow.GetLogger(ctx).Warn("CreateTopicIssue failed (non-blocking)", "error", err)
+	}
+
+	// 3. Wait for human selection
 	s.State = StateWaitTopicSelection
 	setState(ctx, StateWaitTopicSelection)
 	return s

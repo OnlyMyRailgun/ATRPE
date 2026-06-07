@@ -61,6 +61,7 @@ func main() {
 
 	w.RegisterWorkflow(workflows.ArticleWorkflow)
 	w.RegisterActivity(acts.DiscoverTopics)
+	w.RegisterActivity(acts.CreateTopicIssue)
 	w.RegisterActivity(acts.ResearchTopic)
 	w.RegisterActivity(acts.DesignArchitecture)
 	w.RegisterActivity(acts.PublishArticle)

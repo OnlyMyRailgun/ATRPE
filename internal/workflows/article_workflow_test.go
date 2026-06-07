@@ -8,11 +8,24 @@ import (
 	"go.temporal.io/sdk/testsuite"
 )
 
+func setupEnv(env *testsuite.TestWorkflowEnvironment) {
+	env.RegisterWorkflow(ArticleWorkflow)
+
+	// Mock DiscoverTopics
+	env.RegisterActivity(func() (map[string]interface{}, error) {
+		return map[string]interface{}{"candidates": []interface{}{}}, nil
+	})
+
+	// Mock CreateTopicIssue
+	env.RegisterActivity(func(input interface{}) (map[string]interface{}, error) {
+		return map[string]interface{}{"issue_url": "test://issue"}, nil
+	})
+}
+
 func TestArticleWorkflow_HappyPath(t *testing.T) {
 	suite := &testsuite.WorkflowTestSuite{}
 	env := suite.NewTestWorkflowEnvironment()
-
-	env.RegisterWorkflow(ArticleWorkflow)
+	setupEnv(env)
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow("TopicSelectedSignal", TopicSelectedSignal{CandidateID: "abc123"})
@@ -31,8 +44,7 @@ func TestArticleWorkflow_HappyPath(t *testing.T) {
 func TestArticleWorkflow_AbortDuringWaitSelection(t *testing.T) {
 	suite := &testsuite.WorkflowTestSuite{}
 	env := suite.NewTestWorkflowEnvironment()
-
-	env.RegisterWorkflow(ArticleWorkflow)
+	setupEnv(env)
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow("AbortSignal", AbortSignal{})
@@ -47,8 +59,7 @@ func TestArticleWorkflow_AbortDuringWaitSelection(t *testing.T) {
 func TestArticleWorkflow_ChangesDuringApproval(t *testing.T) {
 	suite := &testsuite.WorkflowTestSuite{}
 	env := suite.NewTestWorkflowEnvironment()
-
-	env.RegisterWorkflow(ArticleWorkflow)
+	setupEnv(env)
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow("TopicSelectedSignal", TopicSelectedSignal{CandidateID: "abc123"})
@@ -67,5 +78,3 @@ func TestArticleWorkflow_ChangesDuringApproval(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
 }
-
-// Escalated retry is tested in the end-to-end test suite after activity wiring
