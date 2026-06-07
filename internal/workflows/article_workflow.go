@@ -64,9 +64,7 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 		s.MaxRemediation = 3
 	}
 
-	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
-		"workflow_state": string(StateDiscover),
-	})
+	// Search attributes deferred (needs Temporal namespace config)
 
 	for s.State != StateCompleted && s.State != StateFailed && s.State != StateAborted {
 		switch s.State {
@@ -101,9 +99,7 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 }
 
 func setState(ctx workflow.Context, state WorkflowState) {
-	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
-		"workflow_state": string(state),
-	})
+	// Search attributes deferred — register in Temporal namespace first
 }
 
 func defaultActivityOptions() workflow.ActivityOptions {
@@ -135,10 +131,7 @@ func runWaitTopicSelection(ctx workflow.Context, s ArticleWorkflowState) Article
 		c.Receive(ctx, &sig)
 		s.CandidateID = sig.CandidateID
 		s.State = StateResearch
-		workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
-			"topic_id":       s.CandidateID,
-			"workflow_state": string(StateResearch),
-		})
+		// topic_id = s.CandidateID (search attribute deferred)
 	})
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "AbortSignal"), func(c workflow.ReceiveChannel, more bool) {
 		var sig AbortSignal
