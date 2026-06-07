@@ -285,6 +285,7 @@ func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWor
 			"title": draft.Title,
 			"body":  draft.Body,
 		},
+		"issue_number": s.IssueNumber,
 	}).Get(ctx, &prResult)
 	if err != nil {
 		workflow.GetLogger(ctx).Error("CreateArticlePR failed", "error", err)

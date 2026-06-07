@@ -246,7 +246,8 @@ func (a *Activities) GenerateDraft(ctx context.Context, input GenerateDraftInput
 // -- Create Article PR --
 
 type CreateArticlePRInput struct {
-	Draft artifacts.ArticleDraft `json:"draft"`
+	Draft       artifacts.ArticleDraft `json:"draft"`
+	IssueNumber int                    `json:"issue_number"`
 }
 
 type CreateArticlePRResult struct {
@@ -288,7 +289,8 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 	}
 
 	// 4. Create PR
-	prPayload := fmt.Sprintf(`{"title":"📝 %s","head":"%s","base":"main","body":"ATRPE generated article: **%s**\n\nReview and merge to publish on Zenn.\n\n---\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)"}`, draft.Title, branchName, draft.Title)
+	prBody := fmt.Sprintf("ATRPE generated article: **%s**\\n\\nReview and merge to publish on Zenn.\\n\\nCloses #%d\\n\\n---\\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)", draft.Title, input.IssueNumber)
+	prPayload := fmt.Sprintf(`{"title":"📝 %s","head":"%s","base":"main","body":"%s"}`, draft.Title, branchName, prBody)
 	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), prPayload)
 	if err != nil {
 		return nil, fmt.Errorf("create PR: %w", err)
