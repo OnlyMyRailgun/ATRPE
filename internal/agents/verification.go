@@ -107,10 +107,13 @@ func (a *VerificationAgent) Run(ctx context.Context, brief artifacts.TechnicalBr
 
 // checkClaimCitations verifies that each claim in the TechnicalBrief maps
 // to a source that has a fetched snapshot (ContentHash + SnapshotURI).
+// F: NEEDS VERIFICATION and annotations without confidence are FAILED (unmatched).
+// Only CERTAIN and LIKELY with Fetched=true + SnapshotURI count as matched.
 // Returns (matched, unmatched) counts.
 func checkClaimCitations(brief artifacts.TechnicalBrief) (matched, unmatched int) {
-	// Extract source references from claim text annotations like "[source #1: https://...]"
-	sourcePat := regexp.MustCompile(`\[(?:CERTAIN|LIKELY|NEEDS VERIFICATION)\s*[-–—]\s*source\s*#(\d+):?\s*(https?://[^\]]*)?\]`)
+	// Extract source references from structured claim annotations
+	// Match patterns like: "... [CERTAIN — source #3: https://...]" or "[LIKELY — source #1]"
+	sourcePat := regexp.MustCompile(`\[(CERTAIN|LIKELY|NEEDS VERIFICATION)\s*[-–—]\s*source\s*#(\d+):?\s*(https?://[^\]]*)?\]`)
 
 	allClaims := append([]string{}, brief.CoreConcepts...)
 	allClaims = append(allClaims, brief.SupportedClaims...)
@@ -122,18 +125,27 @@ func checkClaimCitations(brief artifacts.TechnicalBrief) (matched, unmatched int
 		sourceByIndex[i+1] = src // 1-based source indexing
 	}
 
-	seenSources := make(map[string]bool)
-
 	for _, claim := range allClaims {
+		if claim == "" {
+			continue
+		}
 		matches := sourcePat.FindStringSubmatch(claim)
-		if len(matches) < 2 {
-			// Claim has no structured source annotation — treat as unmatched
+		if len(matches) < 3 {
+			// No structured source annotation — unmatched
+			unmatched++
+			continue
+		}
+
+		confidence := matches[1]
+
+		// F: NEEDS VERIFICATION is a hard fail
+		if confidence == "NEEDS VERIFICATION" {
 			unmatched++
 			continue
 		}
 
 		sourceIdx := 0
-		_, _ = fmt.Sscanf(matches[1], "%d", &sourceIdx)
+		_, _ = fmt.Sscanf(matches[2], "%d", &sourceIdx)
 
 		src, ok := sourceByIndex[sourceIdx]
 		if !ok {
@@ -147,17 +159,39 @@ func checkClaimCitations(brief artifacts.TechnicalBrief) (matched, unmatched int
 			continue
 		}
 
-		// Source must have a snapshot URI (or we flag it)
+		// Source must have a snapshot URI
 		if src.SnapshotURI == "" {
 			unmatched++
 			continue
 		}
 
-		seenSources[src.URL] = true
 		matched++
 	}
 
 	return matched, unmatched
+}
+
+// ExtractArticleClaims extracts factual claims from an article body for verification.
+// Recognizes: markdown links with citations, code blocks, and explicit source references.
+func ExtractArticleClaims(articleBody string) []string {
+	var claims []string
+
+	// Extract text lines that contain source citations: "[CERTAIN — source #N: url]"
+	claimPat := regexp.MustCompile(`[^.!?\n]*\[(CERTAIN|LIKELY|NEEDS VERIFICATION)\s*[-–—][^]]*\][^.!?\n]*`)
+	matches := claimPat.FindAllString(articleBody, -1)
+	for _, m := range matches {
+		m = strings.TrimSpace(m)
+		if len(m) > 20 {
+			claims = append(claims, m)
+		}
+	}
+
+	// Also extract lines with markdown links to known source URLs
+	linkPat := regexp.MustCompile(`\[([^\]]+)\]\(https?://[^)]+\)`)
+	linkMatches := linkPat.FindAllString(articleBody, -1)
+	claims = append(claims, linkMatches...)
+
+	return claims
 }
 
 func checkLinks(ctx context.Context, brief artifacts.TechnicalBrief) bool {

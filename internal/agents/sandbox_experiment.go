@@ -19,26 +19,26 @@ import (
 // Shell built-ins (cd, echo, export, etc.) are NOT allowed — the sandbox
 // runs commands directly, not through a shell.
 var allowedCommands = map[string]bool{
-	"go":             true,
-	"golangci-lint":  true,
-	"make":           true,
-	"git":            true, // allowed for go mod download
-	"curl":           false, // BLOCKED — network access
-	"wget":           false, // BLOCKED — network access
-	"ssh":            false, // BLOCKED
-	"docker":         false, // BLOCKED
-	"podman":         false, // BLOCKED
-	"kubectl":        false, // BLOCKED
-	"bash":           false, // BLOCKED — no shell escapes
-	"sh":             false, // BLOCKED
-	"sudo":           false, // BLOCKED
-	"pip":            false, // BLOCKED
-	"npm":            false, // BLOCKED
-	"python":         false, // BLOCKED — Go-only sandbox
-	"python3":        false, // BLOCKED
-	"node":           false, // BLOCKED
-	"rustc":          false, // BLOCKED
-	"cargo":          false, // BLOCKED
+	"go":            true,
+	"golangci-lint": true,
+	"make":          false, // BLOCKED — can execute arbitrary shell
+	"git":           false, // BLOCKED — can access git remotes
+	"curl":          false, // BLOCKED — network access
+	"wget":          false, // BLOCKED — network access
+	"ssh":           false, // BLOCKED
+	"docker":        false, // BLOCKED
+	"podman":        false, // BLOCKED
+	"kubectl":       false, // BLOCKED
+	"bash":          false, // BLOCKED — no shell escapes
+	"sh":            false, // BLOCKED
+	"sudo":          false, // BLOCKED
+	"pip":           false, // BLOCKED
+	"npm":           false, // BLOCKED
+	"python":        false, // BLOCKED — Go-only sandbox
+	"python3":       false, // BLOCKED
+	"node":          false, // BLOCKED
+	"rustc":         false, // BLOCKED
+	"cargo":         false, // BLOCKED
 }
 
 // isAllowed returns true if the command executable is in the allowlist.
@@ -152,8 +152,8 @@ func (r *SandboxedExperimentRunner) runSandboxedCmd(ctx context.Context, workdir
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = workdir
 
-	// Network isolation: block external network tools but allow Go module cache.
-	// Go toolchain (vet/test/build) runs locally after deps are vendored.
+	// D: Network isolation — block all network access.
+	// Code must be self-contained; `go vet` and `go test` run on pre-generated code.
 	cmd.Env = []string{
 		"HOME=" + os.Getenv("HOME"),
 		"PATH=" + os.Getenv("PATH"),
@@ -161,12 +161,16 @@ func (r *SandboxedExperimentRunner) runSandboxedCmd(ctx context.Context, workdir
 		"GO111MODULE=on",
 		"GONOSUMDB=*",
 		"GONOSUMCHECK=*",
-		"GOPROXY=file://${GOPATH}/pkg/mod/cache/download,direct",
+		"GOPROXY=off",       // block Go module downloads
+		"GONOPROXY=*",       // block all proxy access
 		"GONOSUMDB=*",
 		"no_proxy=*",
 		"http_proxy=",
 		"https_proxy=",
+		"HTTP_PROXY=",
+		"HTTPS_PROXY=",
 		"GIT_TERMINAL_PROMPT=0",
+		"GIT_EXEC_PATH=",
 		"GIT_SSH_COMMAND=",
 	}
 

@@ -219,6 +219,14 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 func buildFileContents(filePaths []string, workdir string) []map[string]any {
 	var result []map[string]any
 	for _, path := range filePaths {
+		// P-11: Use safeJoin to validate path (no traversal, no absolute)
+		if path == "" || strings.Contains(path, "..") || path[0] == '/' {
+			result = append(result, map[string]any{
+				"path":  path,
+				"error": "unsafe path rejected",
+			})
+			continue
+		}
 		fullPath := workdir + "/" + path
 		data, err := os.ReadFile(fullPath)
 		if err != nil {
@@ -233,13 +241,17 @@ func buildFileContents(filePaths []string, workdir string) []map[string]any {
 		if len(content) > 2000 {
 			excerpt = content[:2000] + "...[truncated]"
 		}
-		result = append(result, map[string]any{
-			"path":           path,
-			"language":       languageFromPath(path),
+		entry := map[string]any{
+			"path":            path,
+			"language":        languageFromPath(path),
 			"content_excerpt": excerpt,
-			"content_hash":   fmt.Sprintf("%x", sha256.Sum256(data))[:16],
-			"full_content":   content,
-		})
+			"content_hash":    fmt.Sprintf("%x", sha256.Sum256(data))[:16],
+		}
+		// P-10: Only include full_content for small files (<=2000 bytes)
+		if len(content) <= 2000 {
+			entry["full_content"] = content
+		}
+		result = append(result, entry)
 	}
 	return result
 }

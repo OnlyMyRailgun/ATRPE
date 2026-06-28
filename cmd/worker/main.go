@@ -73,11 +73,15 @@ func main() {
 	w.RegisterActivity(acts.RunExperiment)
 	w.RegisterActivity(acts.VerifyExperiment)
 	w.RegisterActivity(acts.GenerateDraft)
+	w.RegisterActivity(acts.VerifyArticleClaims)
 	w.RegisterActivity(acts.CreateArticlePR)
 	w.RegisterActivity(acts.PatchExperiment)
 	w.RegisterActivity(acts.UpdateDesign)
 	w.RegisterActivity(acts.CleanupWorkspace)
 	w.RegisterActivity(acts.CollectEngagementMetrics)
+	w.RegisterActivity(acts.VerifyDraftMerged)
+	w.RegisterActivity(acts.VerifyPublishMerge)
+	w.RegisterActivity(acts.MergePublish)
 	w.RegisterActivity(acts.PublishArticle)
 
 	// Start issue poller if GitHub App is configured

@@ -122,6 +122,10 @@ func (a *ExperimentAgent) Run(ctx context.Context, design artifacts.DesignArtifa
 
 	var filePaths []string
 	for _, f := range mod.Files {
+		// E: Reject absolute paths and traversal
+		if !pathSafe(f.Path) {
+			return artifacts.ExperimentResult{}, fmt.Errorf("unsafe path: %s", f.Path)
+		}
 		fullPath := filepath.Join(workdir, f.Path)
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 			return artifacts.ExperimentResult{}, fmt.Errorf("mkdir for %s: %w", f.Path, err)
@@ -192,7 +196,14 @@ func (a *ExperimentAgent) Patch(ctx context.Context, design artifacts.DesignArti
 
 	var patchedFiles []artifacts.PatchedFile
 	for _, f := range mod.Files {
-		fullPath := filepath.Join(result.Environment.Workdir, f.Path)
+		// PO-5: path safety check in Patch stage too
+		if !pathSafe(f.Path) {
+			continue // skip unsafe paths
+		}
+		fullPath, err := safeJoin(result.Environment.Workdir, f.Path)
+		if err != nil {
+			continue
+		}
 		oldHash := ""
 		if old, err := os.ReadFile(fullPath); err == nil {
 			oldHash = hashBytes(old)
@@ -220,6 +231,30 @@ func (a *ExperimentAgent) Patch(ctx context.Context, design artifacts.DesignArti
 		FailedCommands:     failedCmds,
 		RemediationReason:  fmt.Sprintf("%d commands failed", len(failedCmds)),
 	}, nil
+}
+
+// E/P-11: safeJoin validates and joins a root dir with a relative path.
+// Rejects absolute paths, traversal (../), and cleaned results escaping root.
+func safeJoin(root, rel string) (string, error) {
+	cleaned := filepath.Clean(rel)
+	if filepath.IsAbs(rel) || filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("absolute paths not allowed: %s", rel)
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path traversal rejected: %s", rel)
+	}
+	joined := filepath.Join(root, cleaned)
+	// Verify the result still has root as prefix
+	if !strings.HasPrefix(filepath.Clean(joined), filepath.Clean(root)) {
+		return "", fmt.Errorf("path escapes root: %s", rel)
+	}
+	return joined, nil
+}
+
+// E: pathSafe rejects absolute paths and traversal attempts (kept as alias).
+func pathSafe(p string) bool {
+	_, err := safeJoin("/safe/phony", p)
+	return err == nil
 }
 
 func hashBytes(b []byte) string {

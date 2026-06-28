@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 // TemporalSignalSender sends signals to Temporal workflows.
@@ -17,7 +18,13 @@ type TemporalSignalSender interface {
 	SendSignal(ctx context.Context, workflowID, signal string, payload map[string]any) error
 }
 
-// WebhookHandler validates and processes GitHub issue comment webhooks.
+// PublishMappingLookup resolves a slug to its original GitHub issue number.
+// Implemented by the API server which has access to the knowledge store.
+type PublishMappingLookup interface {
+	LookupIssueNumber(ctx context.Context, slug string) (int, error)
+}
+
+// WebhookHandler validates and processes GitHub webhook events.
 type WebhookHandler struct {
 	webhookSecret string
 	sender        TemporalSignalSender
@@ -35,7 +42,7 @@ func NewWebhookHandler(secret string, sender TemporalSignalSender, logger *slog.
 // ValidateSignature checks the HMAC-SHA256 signature of a webhook payload.
 func ValidateSignature(body []byte, signature, secret string) error {
 	if secret == "" {
-		return nil // dev mode: skip validation
+		return nil
 	}
 	if signature == "" {
 		return fmt.Errorf("missing signature header")
@@ -60,6 +67,23 @@ type githubCommentEvent struct {
 	} `json:"issue"`
 }
 
+// PO-2: pull_request event structure for merge detection.
+type githubPullRequestEvent struct {
+	Action      string `json:"action"` // "closed" for merge
+	Number      int    `json:"number"`
+	PullRequest struct {
+		Merged bool   `json:"merged"`
+		Title  string `json:"title"`
+		Head   struct {
+			Ref string `json:"ref"` // branch name
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	} `json:"pull_request"`
+}
+
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -82,15 +106,22 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	event := r.Header.Get("X-GitHub-Event")
-	if event != "issue_comment" {
+
+	switch event {
+	case "issue_comment":
+		h.handleIssueComment(w, r, body)
+	case "pull_request":
+		h.handlePullRequest(w, r, body)
+	default:
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ignored"}`))
-		return
 	}
+}
 
+func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Request, body []byte) {
 	var evt githubCommentEvent
 	if err := json.Unmarshal(body, &evt); err != nil {
-		h.logger.Error("unmarshal event", "error", err)
+		h.logger.Error("unmarshal comment event", "error", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -128,4 +159,96 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp)
+}
+
+// PO-2: handlePullRequest processes pull_request webhook events.
+// When a publish PR (atrpe-publish/* branch) is merged, signals the workflow.
+func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Request, body []byte) {
+	var evt githubPullRequestEvent
+	if err := json.Unmarshal(body, &evt); err != nil {
+		h.logger.Error("unmarshal PR event", "error", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// PO-2: Must be "closed" and actually merged
+	if evt.Action != "closed" || !evt.PullRequest.Merged {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ignored"}`))
+		return
+	}
+
+	// PO-2: Only react to publish branches (atrpe-publish/*)
+	if !strings.HasPrefix(evt.PullRequest.Head.Ref, "atrpe-publish/") {
+		h.logger.Debug("PR merge ignored — not a publish branch", "ref", evt.PullRequest.Head.Ref)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"non-publish-branch"}`))
+		return
+	}
+
+	// PO-2: Extract slug from branch name: atrpe-publish/<slug>-MMDD-HHMM
+	branch := evt.PullRequest.Head.Ref
+	slug := extractSlugFromPublishBranch(branch)
+	if slug == "" {
+		h.logger.Warn("cannot extract slug from publish branch", "branch", branch)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"invalid-branch-format"}`))
+		return
+	}
+
+	h.logger.Info("publish PR merged — signalling workflow",
+		"branch", branch, "slug", slug, "sha", evt.PullRequest.Head.SHA)
+
+	// Fix 3: Extract issue number directly from branch name (atrpe-publish/<slug>-N<number>)
+	// No SQLite lookup needed — webhook is stateless.
+	issueNumber := extractIssueNumberFromPublishBranch(branch)
+	workflowID := fmt.Sprintf("article-issue-%d", issueNumber)
+	if issueNumber <= 0 {
+		workflowID = "publish-" + slug
+	}
+
+	if h.sender != nil {
+		if err := h.sender.SendSignal(r.Context(), workflowID, "PublishMergedSignal", map[string]any{
+			"slug":      slug,
+			"pr_number": evt.Number,
+			"head_sha":  evt.PullRequest.Head.SHA,
+		}); err != nil {
+			h.logger.Error("send publish merge signal", "error", err, "workflowID", workflowID)
+			http.Error(w, "signal error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	resp, _ := json.Marshal(map[string]string{
+		"status": "ok",
+		"signal": "PublishMergedSignal",
+		"slug":   slug,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
+}
+
+// Fix 3: extractSlugFromPublishBranch parses "atrpe-publish/<slug>-N<number>" → slug.
+func extractSlugFromPublishBranch(branch string) string {
+	branch = strings.TrimPrefix(branch, "atrpe-publish/")
+	// Remove trailing -N<number>
+	idx := strings.LastIndex(branch, "-N")
+	if idx < 0 {
+		return branch // fallback: whole thing is the slug
+	}
+	return branch[:idx]
+}
+
+// Fix 3: extractIssueNumberFromPublishBranch parses "atrpe-publish/<slug>-N<number>" → number.
+func extractIssueNumberFromPublishBranch(branch string) int {
+	branch = strings.TrimPrefix(branch, "atrpe-publish/")
+	idx := strings.LastIndex(branch, "-N")
+	if idx < 0 {
+		return 0
+	}
+	numStr := branch[idx+2:]
+	var n int
+	_, _ = fmt.Sscanf(numStr, "%d", &n)
+	return n
 }
