@@ -45,7 +45,7 @@ func Load() (*Settings, error) {
 		CloudApprovalEnabled:      getEnvBool("CLOUD_APPROVAL_ENABLED", false),
 		ExperimentEnvType:         getEnv("EXPERIMENT_ENV_TYPE", "local"),
 		DefaultExperimentLanguage: getEnv("DEFAULT_EXPERIMENT_LANGUAGE", "go"),
-		VerificationChecks:        getEnvSlice("VERIFICATION_CHECKS", "lint,vet,tests,links"),
+		VerificationChecks:        getEnvSlice("VERIFICATION_CHECKS", "lint,vet,tests,links,citations"),
 		MaxRemediationAttempts:    getEnvInt("MAX_REMEDIATION_ATTEMPTS", 3),
 		ColdStartEnabled:          getEnvBool("COLD_START_ENABLED", true),
 		TopicSources:              getEnvSlice("TOPIC_SOURCES", "github_trending,hackernews,zenn_trending,qiita_trending,rss_feeds"),

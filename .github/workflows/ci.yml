@@ -70,7 +70,7 @@ jobs:
         run: |
           FAILED=0
 
-          # 1. Frontmatter — drafts must have published:false
+          # 1. Frontmatter — draft PRs must NOT have published:true
           echo "::group::1. Frontmatter + publish gate"
           for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
             echo "  $f"
@@ -81,7 +81,8 @@ jobs:
               fi
             done
             if grep -q 'published: true' "$f" 2>/dev/null; then
-              echo "    ⚠️  published:true in draft PR — should be false unless this is a publish commit"
+              echo "    ❌ published:true in draft PR — must be false (only publish commits flip to true)"
+              FAILED=1
             fi
           done
           echo "::endgroup::"
@@ -113,26 +114,32 @@ jobs:
           done
           echo "::endgroup::"
 
-          # 4. Citation coverage (>= 2 markdown links)
+          # 4. Citation coverage — hard fail if < 2 links in article files
           echo "::group::4. Citation coverage"
+          ARTICLES_EXIST=0
           for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+            ARTICLES_EXIST=1
             LINK_COUNT=$(grep -o '\[.*\](http[^)]*' "$f" 2>/dev/null | wc -l || echo 0)
             if [ "$LINK_COUNT" -lt 2 ]; then
-              echo "  ⚠️  $f: $LINK_COUNT links (aim for >= 2)"
+              echo "  ❌ $f: $LINK_COUNT links (need >= 2)"
+              FAILED=1
             else
               echo "  ✅ $f: $LINK_COUNT citation links"
             fi
           done
           echo "::endgroup::"
 
-          # 5. Source snapshot / citation registry
+          # 5. Source snapshots — hard fail if articles exist but no snapshots
           echo "::group::5. Source snapshots"
           SNAP_COUNT=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
           echo "  Snapshots: $SNAP_COUNT"
           if [ "$SNAP_COUNT" -gt 0 ] 2>/dev/null; then
             echo "  ✅ Snapshots present"
+          elif [ "$ARTICLES_EXIST" -eq 1 ]; then
+            echo "  ❌ Articles exist but no source snapshots found"
+            FAILED=1
           else
-            echo "  ℹ️  No snapshots (expected for new repos)"
+            echo "  ℹ️  No snapshots (expected for new repos with no articles)"
           fi
           echo "::endgroup::"
 

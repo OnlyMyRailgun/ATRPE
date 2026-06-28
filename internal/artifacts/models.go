@@ -120,6 +120,9 @@ type VerificationReport struct {
 	VetPassed       bool            `json:"vet_passed"`
 	TestsPassed     bool            `json:"tests_passed"`
 	LinksPassed     bool            `json:"links_passed"`
+	CitationsPassed bool            `json:"citations_passed"`
+	ClaimsMatched   int             `json:"claims_matched"`
+	ClaimsUnmatched int             `json:"claims_unmatched"`
 	OverallPassed   bool            `json:"overall_passed"`
 	BlockingIssues  []string        `json:"blocking_issues"`
 	Warnings        []string        `json:"warnings"`
