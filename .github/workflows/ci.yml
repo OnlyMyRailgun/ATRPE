@@ -150,17 +150,17 @@ jobs:
           done
           echo "::endgroup::"
 
-          # ── 5. Source snapshots (informational only — data lives in ObjectStore, not git) ──
-          echo "::group::5. Source snapshots (info)"
-          S=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
-          M=0
-          test -f data/manifests/citation_manifest.json && M=1
-          echo "  Snapshots: $S  Manifest: $M"
-          if [ "$M" -gt 0 ] || [ "$S" -gt 0 ]; then
-            echo "  ✅ Source proof present"
-          else
-            echo "  ℹ️  No local snapshots (snapshots live in ObjectStore — verified at workflow time)"
-          fi
+          # ── 5. Per-slug source manifest ──
+          echo "::group::5. Source manifests"
+          for f in $FILES; do
+            slug=$(basename "$f" .md)
+            manifest="data/artifacts/manifests/${slug}.citation.json"
+            if test -f "$manifest"; then
+              echo "  ✅ $f → $manifest present"
+            else
+              echo "  ℹ️  $f: no per-slug manifest (snapshots verified at workflow time in ObjectStore)"
+            fi
+          done
           echo "::endgroup::"
 
           if [ "$FAILED" -eq 1 ]; then

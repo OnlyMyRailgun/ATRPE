@@ -540,7 +540,7 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 				"branch":  branchName,
 			}
 			manifestB, _ := json.Marshal(manifestPayload)
-			manifestPath := fmt.Sprintf("data/manifests/%s.citation.json", draft.Slug)
+			manifestPath := fmt.Sprintf("data/artifacts/manifests/%s.citation.json", draft.Slug)
 			_, _ = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repo, manifestPath), string(manifestB))
 		}
 	}
