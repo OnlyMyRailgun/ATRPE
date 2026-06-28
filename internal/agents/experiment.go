@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -95,6 +96,15 @@ func NewExperimentAgent(codeGen CodeGenerator, runner ExperimentRunner, workspac
 	return &ExperimentAgent{codeGen: codeGen, runner: runner, workspaceRoot: workspaceRoot}
 }
 
+// NewSandboxedExperimentAgent creates an experiment agent with the sandboxed runner.
+func NewSandboxedExperimentAgent(codeGen CodeGenerator, workspaceRoot string) *ExperimentAgent {
+	return &ExperimentAgent{
+		codeGen:       codeGen,
+		runner:        NewSandboxedExperimentRunner(),
+		workspaceRoot: workspaceRoot,
+	}
+}
+
 // Run generates a Go module from the design and runs validation commands.
 func (a *ExperimentAgent) Run(ctx context.Context, design artifacts.DesignArtifact) (artifacts.ExperimentResult, error) {
 	executionID := uuid.New().String()
@@ -127,7 +137,7 @@ func (a *ExperimentAgent) Run(ctx context.Context, design artifacts.DesignArtifa
 		return artifacts.ExperimentResult{}, fmt.Errorf("run commands: %w", err)
 	}
 
-	return artifacts.ExperimentResult{
+	result := artifacts.ExperimentResult{
 		BaseArtifact: artifacts.BaseArtifact{
 			ArtifactID:        uuid.New(),
 			ArtifactType:      "experiment_result",
@@ -143,7 +153,27 @@ func (a *ExperimentAgent) Run(ctx context.Context, design artifacts.DesignArtifa
 		Entrypoints:         []string{mod.Entrypoint},
 		GeneratedFiles:      filePaths,
 		Commands:            commands,
-	}, nil
+	}
+
+	// Capture sandbox file snapshots for audit trail
+	if sr, ok := a.runner.(*SandboxedExperimentRunner); ok {
+		before := sr.CapturedBefore()
+		after := sr.CapturedAfter()
+		if len(before) > 0 || len(after) > 0 {
+			snapData, _ := json.Marshal(map[string]interface{}{
+				"before": before,
+				"after":  after,
+			})
+			result.Commands = append(result.Commands, artifacts.CommandResult{
+				Name:    "atrpe-sandbox-snapshot",
+				Args:    []string{"snapshot", "workspace"},
+				ExitCode: 0,
+				Stdout:  string(snapData),
+			})
+		}
+	}
+
+	return result, nil
 }
 
 // Patch re-generates code after a failure and returns the patch.

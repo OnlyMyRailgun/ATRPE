@@ -546,7 +546,7 @@ func runWaitPublishApproval(ctx workflow.Context, s ArticleWorkflowState) Articl
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "PublishApprovalSignal"), func(c workflow.ReceiveChannel, more bool) {
 		c.Receive(ctx, &PublishApprovalSignal{})
 		comment(ctx, s.IssueNumber, "✅ Approved! Merge the PR to publish on Zenn.")
-		s.State = StateCompleted
+		s.State = StatePublish
 	})
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "RequestChangesSignal"), func(c workflow.ReceiveChannel, more bool) {
 		var sig RequestChangesSignal
