@@ -293,9 +293,16 @@ type UpdateDesignInput struct {
 
 func (a *Activities) RunExperiment(ctx context.Context, input ExperimentInput) (*artifacts.ExperimentResult, error) {
 	design := input.Design
+
+	// Use sandboxed runner when configured (default: true)
+	var runner agents.ExperimentRunner = &agents.DefaultExperimentRunner{}
+	if getEnvBool("EXPERIMENT_SANDBOX_ENABLED", true) {
+		runner = agents.NewSandboxedExperimentRunner()
+	}
+
 	agent := agents.NewExperimentAgent(
 		agents.NewLLMCodeGenerator(a.LLM),
-		&agents.DefaultExperimentRunner{},
+		runner,
 		"/tmp/atrpe-workspaces",
 	)
 	result, err := agent.Run(ctx, design)

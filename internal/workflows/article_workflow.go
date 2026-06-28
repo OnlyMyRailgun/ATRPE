@@ -575,7 +575,8 @@ func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSta
 		Escalated bool   `json:"escalated"`
 	}
 	err := workflow.ExecuteActivity(ctx, "PublishArticle", map[string]interface{}{
-		"draft": s.LastDraft,
+		"draft":      s.LastDraft, // pass full draft — activity reads published:false→true
+		"auto_merge": false,       // MVP: manual merge via PR review
 	}).Get(ctx, &pubResult)
 	if err != nil {
 		workflow.GetLogger(ctx).Error("PublishArticle failed", "error", err)
