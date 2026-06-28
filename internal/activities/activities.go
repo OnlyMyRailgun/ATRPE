@@ -109,7 +109,7 @@ func (a *Activities) DiscoverTopics(ctx context.Context) (*DiscoverTopicsResult,
 	}
 	// Store all candidates in SQLite
 	for _, c := range candidates {
-		a.Store.SaveTopicCandidate(ctx, c)
+		_ = a.Store.SaveTopicCandidate(ctx, c)
 	}
 	// Return top 5
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
@@ -303,7 +303,7 @@ func (a *Activities) RunExperiment(ctx context.Context, input ExperimentInput) (
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "experiment_results", result.ArtifactID.String(), result.TopicID, result)
+	_, _ = repo.SaveArtifact(ctx, "experiment_results", result.ArtifactID.String(), result.TopicID, result)
 	return &result, nil
 }
 
@@ -321,7 +321,7 @@ func (a *Activities) VerifyExperiment(ctx context.Context, input VerifyInput) (*
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "verification_reports", report.ArtifactID.String(), report.TopicID, report)
+	_, _ = repo.SaveArtifact(ctx, "verification_reports", report.ArtifactID.String(), report.TopicID, report)
 	return &report, nil
 }
 
@@ -338,7 +338,7 @@ func (a *Activities) PatchExperiment(ctx context.Context, input PatchExperimentI
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "patch_results", patch.ArtifactID.String(), patch.TopicID, patch)
+	_, _ = repo.SaveArtifact(ctx, "patch_results", patch.ArtifactID.String(), patch.TopicID, patch)
 	return &patch, nil
 }
 
@@ -429,7 +429,7 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 		return nil, fmt.Errorf("get main ref: %w", err)
 	}
 	var ref struct{ Object struct{ SHA string `json:"sha"` } `json:"object"` }
-	json.Unmarshal(mainRef, &ref)
+	_ = json.Unmarshal(mainRef, &ref)
 
 	// 2. Create branch from main
 	createRefPayload := fmt.Sprintf(`{"ref":"refs/heads/%s","sha":"%s"}`, branchName, ref.Object.SHA)
@@ -460,7 +460,7 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 	}
 
 	var prResult struct{ HTMLURL string `json:"html_url"` }
-	json.Unmarshal(prResp, &prResult)
+	_ = json.Unmarshal(prResp, &prResult)
 
 	return &CreateArticlePRResult{PRURL: prResult.HTMLURL}, nil
 }

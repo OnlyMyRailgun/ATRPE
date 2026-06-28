@@ -167,8 +167,8 @@ func (a *ExperimentAgent) Patch(ctx context.Context, design artifacts.DesignArti
 		if old, err := os.ReadFile(fullPath); err == nil {
 			oldHash = hashBytes(old)
 		}
-		os.MkdirAll(filepath.Dir(fullPath), 0755)
-		os.WriteFile(fullPath, []byte(f.Content), 0644)
+		_ = os.MkdirAll(filepath.Dir(fullPath), 0755)
+		_ = os.WriteFile(fullPath, []byte(f.Content), 0644)
 		newHash := hashBytes([]byte(f.Content))
 		patchedFiles = append(patchedFiles, artifacts.PatchedFile{
 			Path: f.Path, OldHash: oldHash, NewHash: newHash,

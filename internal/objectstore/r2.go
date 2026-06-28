@@ -48,11 +48,6 @@ func (s *R2ObjectStore) Delete(ctx context.Context, uri URI) error {
 	return fmt.Errorf("R2ObjectStore.Delete: not yet wired")
 }
 
-// buildR2URL constructs the full R2 endpoint URL for a key.
-func buildR2URL(endpoint, bucket, key string) string {
-	return fmt.Sprintf("%s/%s/%s", endpoint, bucket, key)
-}
-
 // NewObjectStore creates the configured store (local or R2).
 func NewObjectStore(storeType, localDir, r2Endpoint, r2Bucket, r2AccessKey, r2SecretKey string) ObjectStore {
 	switch storeType {

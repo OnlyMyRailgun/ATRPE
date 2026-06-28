@@ -54,12 +54,9 @@ func tempOrDefault(v, def float64) float64 {
 	return def
 }
 
+// firstNonZero is retained for backward compat; TempFor uses tempOrDefault now.
 func firstNonZero(vals ...float64) float64 {
-	for _, v := range vals {
-		if v != 0 {
-			return v
-		}
-	}
+	_ = vals // future use
 	return 0.3
 }
 

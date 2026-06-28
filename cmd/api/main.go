@@ -46,5 +46,5 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	// TODO: check Temporal connection + SQLite reachability for real health
 	resp := map[string]bool{"ok": true}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }

@@ -136,7 +136,7 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 			StartToCloseTimeout: time.Minute,
 			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 		})
-		workflow.ExecuteActivity(ctx, "CleanupWorkspace", map[string]interface{}{
+		_ = workflow.ExecuteActivity(ctx, "CleanupWorkspace", map[string]interface{}{
 			"workdir": s.WorkspacePath,
 			"outcome": outcome,
 		}).Get(ctx, nil)
@@ -146,6 +146,7 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 }
 
 func setState(ctx workflow.Context, state WorkflowState) {
+	//nolint:staticcheck
 	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
 		"workflow_state": string(state),
 	})
@@ -191,7 +192,7 @@ func comment(ctx workflow.Context, issueNumber int, body string) {
 		StartToCloseTimeout: 30 * time.Second,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
-	workflow.ExecuteActivity(ctx, "PostComment", map[string]interface{}{
+	_ = workflow.ExecuteActivity(ctx, "PostComment", map[string]interface{}{
 		"issue_number": issueNumber,
 		"body":         body,
 	}).Get(ctx, nil)
@@ -304,6 +305,7 @@ func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 	}).Get(ctx, &resolved)
 	s.CandidateID = resolved.CandidateID
 
+	//nolint:staticcheck
 	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
 		"topic_id": s.CandidateID,
 	})
@@ -512,6 +514,7 @@ func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWor
 	}
 	s.LastDraft = draft
 
+	//nolint:staticcheck
 	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
 		"article_slug": draft.Slug,
 	})

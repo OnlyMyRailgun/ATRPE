@@ -203,7 +203,7 @@ func main() {
 
 	// ── Save article ──
 	outPath := fmt.Sprintf("/tmp/atrpe-article-%s.md", draft.Slug)
-	os.WriteFile(outPath, []byte(draft.Body), 0644)
+	_ = os.WriteFile(outPath, []byte(draft.Body), 0644)
 
 	// ═══ CLEANUP ═══
 	if result.Environment.Workdir != "" {

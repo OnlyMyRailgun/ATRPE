@@ -84,7 +84,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 	if event != "issue_comment" {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ignored"}`))
+		_, _ = w.Write([]byte(`{"status":"ignored"}`))
 		return
 	}
 
@@ -97,7 +97,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if evt.Action != "created" {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ignored"}`))
+		_, _ = w.Write([]byte(`{"status":"ignored"}`))
 		return
 	}
 
@@ -105,7 +105,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Debug("not a command", "body", evt.Comment.Body)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"not_a_command"}`))
+		_, _ = w.Write([]byte(`{"status":"not_a_command"}`))
 		return
 	}
 

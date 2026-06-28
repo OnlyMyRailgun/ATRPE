@@ -119,12 +119,12 @@ func TestResolveCandidateID_ByIndex(t *testing.T) {
 	acts, store := setupTestActivities(t)
 	ctx := context.Background()
 
-	store.SaveTopicCandidate(ctx, artifacts.TopicCandidate{
+	require.NoError(t, store.SaveTopicCandidate(ctx, artifacts.TopicCandidate{
 		ID: "cand-1", Source: "test", Title: "first", URL: "a", Score: 1.0, CreatedAt: time.Now(),
-	})
-	store.SaveTopicCandidate(ctx, artifacts.TopicCandidate{
+	}))
+	require.NoError(t, store.SaveTopicCandidate(ctx, artifacts.TopicCandidate{
 		ID: "cand-2", Source: "test", Title: "second", URL: "b", Score: 0.9, CreatedAt: time.Now(),
-	})
+	}))
 
 	result, err := acts.ResolveCandidateID(ctx, ResolveCandidateInput{Selection: "1"})
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestResolveCandidateID_DirectID(t *testing.T) {
 	acts, store := setupTestActivities(t)
 	ctx := context.Background()
 
-	store.SaveTopicCandidate(ctx, artifacts.TopicCandidate{
+	_ = store.SaveTopicCandidate(ctx, artifacts.TopicCandidate{
 		ID: "abc123def456", Source: "test", Title: "repo", URL: "x", Score: 1.0, CreatedAt: time.Now(),
 	})
 

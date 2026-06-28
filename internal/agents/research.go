@@ -106,7 +106,7 @@ func (a *ResearchAgent) Run(ctx context.Context, topic artifacts.TopicCandidate)
 	}
 
 	resp = extractJSON(resp)
-	json.Unmarshal([]byte(resp), &urlResult)
+	_ = json.Unmarshal([]byte(resp), &urlResult)
 
 	// Build URL list: start with the topic URL, then add suggested URLs
 	urlsToFetch := []string{topic.URL}
