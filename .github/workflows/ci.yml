@@ -12,12 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-
       - name: Build
         run: go build ./...
 
@@ -26,12 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-
       - name: Test
         run: go test -v -race -count=1 ./...
 
@@ -40,117 +36,116 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-
       - name: Vet
         run: go vet ./...
 
-  # ── Hard gate: lint (built from source for Go 1.25 compat) ─
+  # ── Hard gate: lint ───────────────────────────────────────
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-
       - name: Lint
         run: golangci-lint run --timeout=5m ./...
 
-  # ── Hard gate: article quality validation ─────────────────
+  # ── Hard gate: article quality ────────────────────────────
   article-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-
       - name: Article quality check
         run: |
+          set -euo pipefail
           echo "::group::Article Quality Checks"
-
           FAILED=0
 
-          # Frontmatter completeness for every .md in articles/
-          echo "::group::Frontmatter completeness"
+          # 1. Frontmatter — drafts must have published:false
+          echo "::group::1. Frontmatter + publish gate"
           for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
-            echo "  Checking: $f"
-            if ! grep -q '^---$' "$f"; then
-              echo "  ❌ $f: missing frontmatter delimiter"
-              FAILED=1
-            fi
-            if ! grep -q 'published:' "$f"; then
-              echo "  ❌ $f: missing published: field"
-              FAILED=1
-            fi
-            if ! grep -q 'emoji:' "$f"; then
-              echo "  ❌ $f: missing emoji: field"
-              FAILED=1
-            fi
-            if ! grep -q 'type:' "$f"; then
-              echo "  ❌ $f: missing type: field"
-              FAILED=1
-            fi
-            if ! grep -q 'topics:' "$f"; then
-              echo "  ❌ $f: missing topics: field"
-              FAILED=1
+            echo "  $f"
+            for field in '^---' 'published:' 'emoji:' 'type:' 'topics:'; do
+              if ! grep -q "$field" "$f"; then
+                echo "    ❌ missing $field"
+                FAILED=1
+              fi
+            done
+            if grep -q 'published: true' "$f"; then
+              echo "    ⚠️  published:true in draft PR — should be false unless this is a publish commit"
             fi
           done
           echo "::endgroup::"
 
-          # Placeholder detection
-          echo "::group::Placeholder detection"
-          PLACEHOLDERS=("[TODO]" "[WIP]" "[TBD]" "TODO:" "Lorem ipsum" "add more here")
+          # 2. No placeholder / generated junk
+          echo "::group::2. Anti-patterns"
+          PLACEHOLDERS=("[TODO]" "[WIP]" "[TBD]" "TODO:" "Lorem ipsum" "add more here" "coming soon" "work in progress")
           for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
             for p in "${PLACEHOLDERS[@]}"; do
               if grep -qi "$p" "$f"; then
-                echo "  ❌ $f: placeholder text detected: '$p'"
+                echo "  ❌ $f: placeholder '$p'"
                 FAILED=1
               fi
             done
           done
           echo "::endgroup::"
 
-          # Code block minimum (at least 3)
-          echo "::group::Code block count"
+          # 3. Code blocks >= 3
+          echo "::group::3. Code blocks"
           for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
             FENCE_COUNT=$(grep -c '```' "$f" 2>/dev/null || echo 0)
             FENCE_COUNT=$((FENCE_COUNT / 2))
             if [ "$FENCE_COUNT" -lt 3 ]; then
-              echo "  ❌ $f: only $FENCE_COUNT code blocks — need at least 3"
+              echo "  ❌ $f: $FENCE_COUNT blocks (need >= 3)"
               FAILED=1
             else
-              echo "  $f: $FENCE_COUNT code blocks ✅"
+              echo "  ✅ $f: $FENCE_COUNT code blocks"
             fi
           done
           echo "::endgroup::"
 
+          # 4. Citation coverage (>= 2 markdown links)
+          echo "::group::4. Citation coverage"
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
+            LINK_COUNT=$(grep -oP '\[.*?\]\(https?://.*?\)' "$f" 2>/dev/null | wc -l)
+            if [ "$LINK_COUNT" -lt 2 ]; then
+              echo "  ⚠️  $f: $LINK_COUNT links (aim for >= 2)"
+            else
+              echo "  ✅ $f: $LINK_COUNT citation links"
+            fi
+          done
+          echo "::endgroup::"
+
+          # 5. Source snapshot / citation registry
+          echo "::group::5. Source snapshots"
+          SNAP_COUNT=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l)
+          echo "  Snapshots: $SNAP_COUNT"
+          if [ "$SNAP_COUNT" -gt 0 ]; then
+            echo "  ✅ Snapshots present"
+          else
+            echo "  ℹ️  No snapshots (expected for new repos)"
+          fi
+          echo "::endgroup::"
+
           if [ "$FAILED" -eq 1 ]; then
-            echo ""
-            echo "❌ Article quality checks FAILED. Fix issues above before merge."
+            echo "❌ Article quality checks FAILED"
             exit 1
           fi
-          echo ""
           echo "✅ Article quality checks PASSED"
           echo "::endgroup::"
 
 # ────────────────────────────────────────────────────────────
-# When branch protection is enabled on main, require:
-#   - build
-#   - test
-#   - vet
-#   - lint
-#   - article-check
+# Branch Protection (manual — set in repo Settings → Branches):
+#   Require: build, test, vet, lint, article-check
 # ────────────────────────────────────────────────────────────

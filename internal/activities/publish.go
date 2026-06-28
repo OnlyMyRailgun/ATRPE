@@ -140,17 +140,22 @@ func authFromToken(token string) *http.BasicAuth {
 }
 
 // buildZennMarkdown produces a Zenn-compatible markdown file with frontmatter.
+// It respects draft.Published: false for draft PRs, true for final publish.
 func buildZennMarkdown(draft artifacts.ArticleDraft) string {
+	publishedStr := "false"
+	if draft.Published {
+		publishedStr = "true"
+	}
 	return fmt.Sprintf(`---
 title: "%s"
 emoji: "%s"
 type: "%s"
 topics: [%s]
-published: true
+published: %s
 ---
 
 %s
-`, draft.Title, draft.Emoji, draft.Type, quoteTopics(draft.Topics), draft.Body)
+`, draft.Title, draft.Emoji, draft.Type, quoteTopics(draft.Topics), publishedStr, draft.Body)
 }
 
 func quoteTopics(topics []string) string {
