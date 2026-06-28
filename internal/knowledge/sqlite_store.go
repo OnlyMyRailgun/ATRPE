@@ -143,3 +143,61 @@ func (s *SQLiteStore) GetArtifactURI(ctx context.Context, table, id string) (obj
 	}
 	return objectstore.URI(uri), nil
 }
+
+// Blocker 2/6: SavePublishMapping records slug→issueNumber so the webhook can
+// route PublishMergedSignal to the correct article-issue-N workflow.
+func (s *SQLiteStore) SavePublishMapping(ctx context.Context, slug string, issueNumber int) error {
+	_, err := s.db.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS publish_mappings (
+			slug TEXT PRIMARY KEY,
+			issue_number INTEGER NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+	)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO publish_mappings (slug, issue_number, created_at) VALUES (?, ?, ?)`,
+		slug, issueNumber, time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+// GetPublishMapping looks up the issue number for a publish slug.
+func (s *SQLiteStore) GetPublishMapping(ctx context.Context, slug string) (int, error) {
+	// Ensure table exists
+	_, _ = s.db.ExecContext(ctx,
+		`CREATE TABLE IF NOT EXISTS publish_mappings (
+			slug TEXT PRIMARY KEY,
+			issue_number INTEGER NOT NULL,
+			created_at TEXT NOT NULL
+		)`)
+	var issueNumber int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT issue_number FROM publish_mappings WHERE slug = ? ORDER BY created_at DESC LIMIT 1`,
+		slug,
+	).Scan(&issueNumber)
+	return issueNumber, err
+}
+
+// Blocker 5: ListCitationManifest returns all registered citations for CI/audit.
+func (s *SQLiteStore) ListCitationManifest(ctx context.Context) ([]artifacts.CitationRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, source_url, content_hash, hash_algorithm, retrieved_at FROM citation_registry ORDER BY retrieved_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []artifacts.CitationRecord
+	for rows.Next() {
+		var r artifacts.CitationRecord
+		if err := rows.Scan(&r.ID, &r.SourceURL, &r.ContentHash, &r.HashAlgorithm, &r.RetrievedAt); err != nil {
+			continue
+		}
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}

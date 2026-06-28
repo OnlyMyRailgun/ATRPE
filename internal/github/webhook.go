@@ -18,6 +18,12 @@ type TemporalSignalSender interface {
 	SendSignal(ctx context.Context, workflowID, signal string, payload map[string]any) error
 }
 
+// PublishMappingLookup resolves a slug to its original GitHub issue number.
+// Implemented by the API server which has access to the knowledge store.
+type PublishMappingLookup interface {
+	LookupIssueNumber(ctx context.Context, slug string) (int, error)
+}
+
 // WebhookHandler validates and processes GitHub webhook events.
 type WebhookHandler struct {
 	webhookSecret string
@@ -192,17 +198,25 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 	h.logger.Info("publish PR merged — signalling workflow",
 		"branch", branch, "slug", slug, "sha", evt.PullRequest.Head.SHA)
 
-	// Signal the workflow to complete publication
+	// Blocker 2: Route signal to article-issue-N via slug→issueNumber mapping.
+	// The publish activity records the mapping; webhook uses it to find the workflow.
 	if h.sender != nil {
-		// Find the workflow by searching for the slug — fall back to issue-based ID
-		// The workflow ID follows the same pattern: article-issue-N
-		// For publish events, we use the slug as a workflow search attribute
-		// For now, signal via a known workflow ID pattern if we can derive it
-		if err := h.sender.SendSignal(r.Context(), "publish-"+slug, "PublishMergedSignal", map[string]any{
-			"slug": slug,
+		issueLookup, ok := h.sender.(PublishMappingLookup)
+		workflowID := ""
+		if ok && slug != "" {
+			if n, err := issueLookup.LookupIssueNumber(r.Context(), slug); err == nil && n > 0 {
+				workflowID = fmt.Sprintf("article-issue-%d", n)
+			}
+		}
+		if workflowID == "" {
+			// Fallback: try publish-{slug} (legacy stored workflows)
+			workflowID = "publish-" + slug
+		}
+		if err := h.sender.SendSignal(r.Context(), workflowID, "PublishMergedSignal", map[string]any{
+			"slug":  slug,
 			"title": evt.PullRequest.Title,
 		}); err != nil {
-			h.logger.Error("send publish merge signal", "error", err)
+			h.logger.Error("send publish merge signal", "error", err, "workflowID", workflowID)
 			http.Error(w, "signal error", http.StatusInternalServerError)
 			return
 		}

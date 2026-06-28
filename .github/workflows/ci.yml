@@ -139,14 +139,22 @@ jobs:
           done
           echo "::endgroup::"
 
-          # 5. Source snapshots — hard fail if articles exist but no snapshots
+          # Blocker 5: Source snapshots — check for snapshot manifest OR raw snapshots
+          # data/artifacts/ is .gitignored. Accept: citation_manifest.json, snapshot_manifest.json,
+          # or actual research_snapshots/ dir if committed.
           echo "::group::5. Source snapshots"
+          MANIFEST_COUNT=0
+          test -f data/artifacts/citation_manifest.json && MANIFEST_COUNT=1
+          test -f data/artifacts/snapshot_manifest.json && MANIFEST_COUNT=1
           SNAP_COUNT=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
-          echo "  Snapshots: $SNAP_COUNT"
-          if [ "$SNAP_COUNT" -gt 0 ] 2>/dev/null; then
+          echo "  Manifest files: $MANIFEST_COUNT | Raw snapshots: $SNAP_COUNT"
+          if [ "$MANIFEST_COUNT" -gt 0 ] 2>/dev/null; then
+            echo "  ✅ Citation/snapshot manifest present"
+          elif [ "$SNAP_COUNT" -gt 0 ] 2>/dev/null; then
             echo "  ✅ Snapshots present"
           elif [ "$ARTICLES_EXIST" -eq 1 ]; then
-            echo "  ❌ Articles exist but no source snapshots found"
+            echo "  ❌ Articles exist but no source snapshots or manifest found"
+            echo "     Run: go run ./cmd/citation-manifest > data/artifacts/citation_manifest.json"
             FAILED=1
           else
             echo "  ℹ️  No snapshots (expected for new repos with no articles)"

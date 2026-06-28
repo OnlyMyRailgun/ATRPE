@@ -7,9 +7,10 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/OnlyMyRailgun/ATRPE/internal/config"
 	"github.com/OnlyMyRailgun/ATRPE/internal/github"
+	"github.com/OnlyMyRailgun/ATRPE/internal/knowledge"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/log"
 )
@@ -23,6 +24,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Open knowledge store for publish mapping lookups
+	store, err := knowledge.NewSQLiteStore("data/knowledge.db")
+	if err != nil {
+		logger.Error("sqlite store init", "error", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
 	// Connect to Temporal for sending signals from webhooks
 	var sender github.TemporalSignalSender
 	if cfg.TemporalHostPort != "" {
@@ -35,7 +44,11 @@ func main() {
 			logger.Warn("temporal client unavailable — webhook signals disabled", "error", err)
 		} else {
 			defer c.Close()
-			sender = &temporalSignalSender{client: c}
+			// Blocker 2: Sender carries slug→issueNumber lookup for webhook routing
+			sender = &publishAwareSender{
+				client: c,
+				store:  store,
+			}
 			logger.Info("temporal client connected", "host", cfg.TemporalHostPort)
 		}
 	} else {
@@ -50,7 +63,6 @@ func main() {
 	internalSig := github.NewInternalSignalHandler(cfg.InternalSignalToken, sender, logger)
 	mux.Handle("/internal/workflows/", internalSig)
 
-	// Observability endpoints
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/health", healthHandler)
 
@@ -68,11 +80,17 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// temporalSignalSender sends signals via the Temporal client.
-type temporalSignalSender struct {
+// Blocker 2 + 6: publishAwareSender implements both TemporalSignalSender and PublishMappingLookup.
+// This lets the webhook handler resolve slug→issueNumber for routing PublishMergedSignal.
+type publishAwareSender struct {
 	client client.Client
+	store  *knowledge.SQLiteStore
 }
 
-func (s *temporalSignalSender) SendSignal(ctx context.Context, workflowID, signal string, payload map[string]any) error {
+func (s *publishAwareSender) SendSignal(ctx context.Context, workflowID, signal string, payload map[string]any) error {
 	return s.client.SignalWorkflow(ctx, workflowID, "", signal, payload)
+}
+
+func (s *publishAwareSender) LookupIssueNumber(ctx context.Context, slug string) (int, error) {
+	return s.store.GetPublishMapping(ctx, slug)
 }

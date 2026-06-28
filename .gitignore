@@ -1,3 +1,6 @@
 data/knowledge.db
 *.pem
 data/artifacts/
+# Exceptions for CI audit: allow snapshot manifests but exclude raw data
+!data/artifacts/citation_manifest.json
+!data/artifacts/snapshot_manifest.json

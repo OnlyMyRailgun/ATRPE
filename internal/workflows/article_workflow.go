@@ -529,27 +529,14 @@ func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWor
 	})
 
 	// Create PR
-	comment(ctx, s.IssueNumber, fmt.Sprintf("📝 Article draft generated: **%s**\n\nCreating PR for review...", draft.Title))
+	comment(ctx, s.IssueNumber, fmt.Sprintf("📝 Article draft generated: **%s**\n⏳ Running claim verification before creating PR...", draft.Title))
 
-	var prResult struct{ PRURL string `json:"pr_url"` }
-	err = workflow.ExecuteActivity(ctx, "CreateArticlePR", map[string]interface{}{
-		"draft":        draft,
-		"issue_number": s.IssueNumber,
-	}).Get(ctx, &prResult)
-	if err != nil {
-		workflow.GetLogger(ctx).Error("CreateArticlePR failed", "error", err)
-		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ PR creation failed: %v", err))
-		s.State = StateFailed
-		return s
-	}
-
-	comment(ctx, s.IssueNumber, fmt.Sprintf("🔀 PR created: %s\n\n📖 Review the article there. Then reply `/approve` to trigger final verification.", prResult.PRURL))
-
-	// P8: Verify the generated article's claims before going to approval
+	// Blocker 4: Verify article claims BEFORE creating PR
 	s.State = StateVerifyArticle
 	setState(ctx, StateVerifyArticle)
 	return s
 }
+
 
 // P8: runVerifyArticle validates the final generated article's claims
 // against the verified experiment results before PR creation.
@@ -582,7 +569,24 @@ func runVerifyArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkf
 		return s
 	}
 
-	comment(ctx, s.IssueNumber, fmt.Sprintf("✅ Article claims verified: %d/%d matched source snapshots", articleReport.ClaimsMatched, articleReport.ClaimsMatched))
+	// Blocker 4: Claims verified — NOW safe to create the PR
+	ctxPR := workflow.WithActivityOptions(ctx, longActivityOptions())
+	var prResult struct{ PRURL string `json:"pr_url"` }
+	err = workflow.ExecuteActivity(ctxPR, "CreateArticlePR", map[string]interface{}{
+		"draft":        s.LastDraft,
+		"issue_number": s.IssueNumber,
+	}).Get(ctx, &prResult)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("CreateArticlePR failed", "error", err)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ PR creation failed: %v", err))
+		s.State = StateFailed
+		return s
+	}
+
+	comment(ctx, s.IssueNumber, fmt.Sprintf(
+		"✅ Article claims verified: %d/%d matched source snapshots\\n🔀 PR created: %s\\n\\n📖 Review & merge this draft, then reply `/approve` to create the publish PR.",
+		articleReport.ClaimsMatched, articleReport.ClaimsMatched, prResult.PRURL))
+
 	s.State = StateWaitPublishApproval
 	setState(ctx, StateWaitPublishApproval)
 	return s
@@ -622,8 +626,9 @@ func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSta
 		Escalated bool   `json:"escalated"`
 	}
 	err := workflow.ExecuteActivity(ctx, "PublishArticle", map[string]interface{}{
-		"draft":      s.LastDraft, // pass full draft — activity reads published:false→true
-		"auto_merge": false,       // MVP: manual merge via PR review
+		"draft":        s.LastDraft,
+"issue_number": s.IssueNumber,
+"auto_merge":   false,
 	}).Get(ctx, &pubResult)
 	if err != nil {
 		workflow.GetLogger(ctx).Error("PublishArticle failed", "error", err)
@@ -671,11 +676,23 @@ func runWaitPublishMerge(ctx workflow.Context, s ArticleWorkflowState) ArticleWo
 
 func runPublishMerged(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
-	comment(ctx, s.IssueNumber, "📝 Recording published article...")
+	comment(ctx, s.IssueNumber, "📝 Verifying publish PR was merged...")
 
-	// PO-3: Use MergePublishInput struct (not map) and handle errors
+	// Blocker 3: Verify merge via GitHub API before recording (prevents /merged bypass)
+	var verifyResult struct{ Merged bool `json:"merged"`; PRURL string `json:"pr_url"` }
+	err := workflow.ExecuteActivity(ctx, "VerifyPublishMerge", map[string]interface{}{
+		"slug": s.LastDraft.Slug,
+	}).Get(ctx, &verifyResult)
+	if err != nil || !verifyResult.Merged {
+		workflow.GetLogger(ctx).Error("VerifyPublishMerge failed or not merged", "error", err, "merged", verifyResult.Merged)
+		comment(ctx, s.IssueNumber, "❌ Publish PR merge NOT confirmed via GitHub API. Verify the PR was actually merged and reply `/retry`.")
+		s.State = StateEscalated
+		return s
+	}
+
+	comment(ctx, s.IssueNumber, "📝 Recording published article...")
 	var mergeResult struct{ Status string `json:"status"` }
-	err := workflow.ExecuteActivity(ctx, "MergePublish", map[string]interface{}{
+	err = workflow.ExecuteActivity(ctx, "MergePublish", map[string]interface{}{
 		"slug":  s.LastDraft.Slug,
 		"title": s.LastDraft.Title,
 	}).Get(ctx, &mergeResult)
