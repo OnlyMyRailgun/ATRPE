@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/your-org/atrpe/internal/agents"
-	"github.com/your-org/atrpe/internal/artifacts"
-	"github.com/your-org/atrpe/internal/topics"
+	"github.com/OnlyMyRailgun/ATRPE/internal/agents"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/topics"
 )
 
 // RefineTopicsInput is the input for topic refinement.

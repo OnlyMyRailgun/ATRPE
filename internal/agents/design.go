@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 // DesignAgent produces a DesignArtifact from a TechnicalBrief.

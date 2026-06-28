@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 // VerificationAgent checks experiment results against success criteria.

@@ -15,13 +15,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/your-org/atrpe/internal/agents"
-	"github.com/your-org/atrpe/internal/artifacts"
-	"github.com/your-org/atrpe/internal/config"
-	"github.com/your-org/atrpe/internal/github"
-	"github.com/your-org/atrpe/internal/knowledge"
-	"github.com/your-org/atrpe/internal/objectstore"
-	"github.com/your-org/atrpe/internal/topics"
+	"github.com/OnlyMyRailgun/ATRPE/internal/agents"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/config"
+	"github.com/OnlyMyRailgun/ATRPE/internal/github"
+	"github.com/OnlyMyRailgun/ATRPE/internal/knowledge"
+	"github.com/OnlyMyRailgun/ATRPE/internal/objectstore"
+	"github.com/OnlyMyRailgun/ATRPE/internal/topics"
 )
 
 // Activities bundles all Temporal activities with their dependencies.

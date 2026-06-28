@@ -7,8 +7,8 @@ import (
 	"os"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/your-org/atrpe/internal/config"
-	"github.com/your-org/atrpe/internal/github"
+	"github.com/OnlyMyRailgun/ATRPE/internal/config"
+	"github.com/OnlyMyRailgun/ATRPE/internal/github"
 )
 
 func main() {

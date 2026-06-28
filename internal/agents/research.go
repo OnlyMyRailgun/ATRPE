@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/your-org/atrpe/internal/artifacts"
-	"github.com/your-org/atrpe/internal/research"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/research"
 )
 
 // ResearchAgent synthesizes research into a TechnicalBrief.

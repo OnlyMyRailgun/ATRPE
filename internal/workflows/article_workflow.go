@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -73,6 +73,9 @@ type ArticleWorkflowState struct {
 
 	// Discovered candidates — stored temporarily for audit → issue flow.
 	cachedCandidates []topicCandidate
+
+	// Experiment workspace path for cleanup on terminal states.
+	WorkspacePath string
 }
 
 func (s *ArticleWorkflowState) Candidates() []topicCandidate {
@@ -119,6 +122,24 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 		case StateEscalated:
 			s = runEscalated(ctx, s)
 		}
+	}
+
+	// Clean up experiment workspace on terminal states
+	if s.WorkspacePath != "" {
+		outcome := "success"
+		if s.State == StateFailed {
+			outcome = "failure"
+		} else if s.State == StateAborted {
+			outcome = "abort"
+		}
+		ctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: time.Minute,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+		})
+		workflow.ExecuteActivity(ctx, "CleanupWorkspace", map[string]interface{}{
+			"workdir": s.WorkspacePath,
+			"outcome": outcome,
+		}).Get(ctx, nil)
 	}
 
 	return nil
@@ -351,6 +372,7 @@ func runExperiment(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflow
 		return s
 	}
 	s.ExperimentResult = result
+	s.WorkspacePath = result.Environment.Workdir
 
 	// Report experiment outcomes
 	passCount, failCount := 0, 0

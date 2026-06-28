@@ -14,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/google/uuid"
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 // PublishInput holds all data needed for the publish step.

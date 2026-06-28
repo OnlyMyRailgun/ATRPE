@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 // CodeGenerator generates Go modules from design artifacts.
@@ -25,36 +25,42 @@ func NewLLMCodeGenerator(llm *LLMClient) *LLMCodeGenerator {
 	return &LLMCodeGenerator{llm: llm}
 }
 
-const codegenSystemPrompt = `You are a Go code generator. Given a design artifact, produce a complete, buildable Go module.
+const codegenSystemPromptV2 = `You are a Go programmer writing a minimal, compilable example module.
 
-Output a JSON object:
+## Rules
+- Generate COMPLETE files: every import, every function body. Nothing unfinished.
+- go.mod must specify a real Go version and required dependencies.
+- Include at least one _test.go file with a table-driven test (func TestXxx(t *testing.T)).
+- The module MUST compile with go build ./... and pass go vet ./...
+- Include a README.md with build/run instructions.
+- Do NOT use "replace" directives in go.mod.
+- Maximum 5 source files total (keep the example focused).
+
+## Output Format
 {
-  "module_name": "example",
+  "module_name": "github.com/example/project",
   "entrypoint": "cmd/example/main.go",
   "files": [
-    {"path": "go.mod", "content": "module example\n\ngo 1.23"},
-    {"path": "cmd/example/main.go", "content": "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}"},
-    {"path": "example_test.go", "content": "package main\n\nimport \"testing\"\n\nfunc TestExample(t *testing.T) {\n\t// test\n}"}
+    {"path": "go.mod", "content": "module ..."},
+    {"path": "cmd/example/main.go", "content": "package main\n..."},
+    {"path": "pkg/lib.go", "content": "package lib\n..."},
+    {"path": "pkg/lib_test.go", "content": "package lib\n\nimport \"testing\"\n..."},
+    {"path": "README.md", "content": "# Example\n..."}
   ]
 }
 
-Rules:
-- go.mod must have a valid module path and go 1.23
-- Every .go file must be compilable (correct package, imports, syntax)
-- Include at least one test file with a real test
-- Keep it minimal: 3-6 files total
-- Implement the components and interactions from the design
-- All files must be complete, never truncated`
+Implement the Components and Interactions from the Design Artifact.
+Every file must be valid Go syntax. Tests must use table-driven pattern.`
 
 // GenerateGoModule generates a Go module from a design artifact.
 func (g *LLMCodeGenerator) GenerateGoModule(ctx context.Context, design artifacts.DesignArtifact) (artifacts.GeneratedModule, error) {
 	designJSON, _ := json.Marshal(design)
 	userPrompt := fmt.Sprintf("Generate a Go module for this design:\n%s", string(designJSON))
 
-	resp, err := g.llm.ChatWithMaxTokens(ctx, []ChatMessage{
-		{Role: "system", Content: todayPrefix() + " " + codegenSystemPrompt},
+	resp, err := g.llm.ChatWithTemp(ctx, []ChatMessage{
+		{Role: "system", Content: todayPrefix() + " " + codegenSystemPromptV2},
 		{Role: "user", Content: userPrompt},
-	}, 16384)
+	}, g.llm.config.TempFor("codegen"), 16384)
 	if err != nil {
 		return artifacts.GeneratedModule{}, fmt.Errorf("codegen llm call: %w", err)
 	}

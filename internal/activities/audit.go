@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/your-org/atrpe/internal/agents"
-	"github.com/your-org/atrpe/internal/artifacts"
-	"github.com/your-org/atrpe/internal/knowledge"
+	"github.com/OnlyMyRailgun/ATRPE/internal/agents"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/knowledge"
 )
 
 // ContentAuditResult is the per-candidate audit produced by the Content Audit stage.

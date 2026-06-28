@@ -1,4 +1,4 @@
-module github.com/your-org/atrpe
+module github.com/OnlyMyRailgun/ATRPE
 
 go 1.25.0
 
