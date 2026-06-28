@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/OnlyMyRailgun/ATRPE/internal/metrics"
 )
 
 // LLMConfig holds the provider connection details.
@@ -29,28 +31,29 @@ type LLMConfig struct {
 func (c LLMConfig) TempFor(agent string) float64 {
 	switch agent {
 	case "research":
-		return firstNonZero(c.TempResearch, 0.1)
+		return tempOrDefault(c.TempResearch, 0.1)
 	case "design":
-		return firstNonZero(c.TempDesign, 0.3)
+		return tempOrDefault(c.TempDesign, 0.3)
 	case "codegen":
-		return firstNonZero(c.TempCodeGen, 0.2)
+		return tempOrDefault(c.TempCodeGen, 0.2)
 	case "verification":
-		return firstNonZero(c.TempVerification, 0.0)
+		return tempOrDefault(c.TempVerification, 0.0)
 	case "writer":
-		return firstNonZero(c.TempWriter, 0.5)
+		return tempOrDefault(c.TempWriter, 0.5)
 	default:
 		return 0.3
 	}
 }
 
-func firstNonZero(vals ...float64) float64 {
-	for _, v := range vals {
-		if v != 0 {
-			return v
-		}
+// tempOrDefault returns v if non-zero, otherwise the default.
+// For verification agent, this allows 0.0 to be the intentional value.
+func tempOrDefault(v, def float64) float64 {
+	if v != 0 {
+		return v
 	}
-	return 0.3
+	return def
 }
+
 
 // ChatMessage represents a single message in an LLM conversation.
 type ChatMessage struct {
@@ -63,6 +66,11 @@ type ChatResponse struct {
 	Choices []struct {
 		Message ChatMessage `json:"message"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 // LLMClient is a minimal OpenAI-compatible HTTP client for LLM calls.
@@ -84,9 +92,13 @@ func (c *LLMClient) Chat(ctx context.Context, messages []ChatMessage) (string, e
 	return c.ChatWithMaxTokens(ctx, messages, 8192)
 }
 
-// ChatWithAgent sends a conversation with the per-agent temperature.
+// ChatWithAgent sends a conversation with the per-agent temperature and records metrics.
 func (c *LLMClient) ChatWithAgent(ctx context.Context, messages []ChatMessage, agent string) (string, error) {
-	return c.ChatWithTemp(ctx, messages, c.config.TempFor(agent), 8192)
+	result, err := c.chatWithTempAndAgent(ctx, messages, c.config.TempFor(agent), 8192, agent)
+	if err != nil {
+		return "", err
+	}
+	return result, nil
 }
 
 // ChatWithMaxTokens allows configuring the max output tokens.
@@ -96,6 +108,13 @@ func (c *LLMClient) ChatWithMaxTokens(ctx context.Context, messages []ChatMessag
 
 // ChatWithTemp sends a conversation with a specific temperature and max tokens.
 func (c *LLMClient) ChatWithTemp(ctx context.Context, messages []ChatMessage, temperature float64, maxTokens int) (string, error) {
+	return c.chatWithTempAndAgent(ctx, messages, temperature, maxTokens, "unknown")
+}
+
+// chatWithTempAndAgent is the unified implementation with metrics recording.
+func (c *LLMClient) chatWithTempAndAgent(ctx context.Context, messages []ChatMessage, temperature float64, maxTokens int, agentName string) (string, error) {
+	start := time.Now()
+
 	reqBody := map[string]interface{}{
 		"model":       c.config.Model,
 		"messages":    messages,
@@ -120,26 +139,38 @@ func (c *LLMClient) ChatWithTemp(ctx context.Context, messages []ChatMessage, te
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		metrics.LLMCallDuration.WithLabelValues(agentName, c.config.Provider, c.config.Model).Observe(time.Since(start).Seconds())
 		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		metrics.LLMCallDuration.WithLabelValues(agentName, c.config.Provider, c.config.Model).Observe(time.Since(start).Seconds())
 		return "", fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		metrics.LLMCallDuration.WithLabelValues(agentName, c.config.Provider, c.config.Model).Observe(time.Since(start).Seconds())
 		return "", fmt.Errorf("llm api error (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		metrics.LLMCallDuration.WithLabelValues(agentName, c.config.Provider, c.config.Model).Observe(time.Since(start).Seconds())
 		return "", fmt.Errorf("unmarshal response: %w", err)
 	}
 
 	if len(chatResp.Choices) == 0 {
+		metrics.LLMCallDuration.WithLabelValues(agentName, c.config.Provider, c.config.Model).Observe(time.Since(start).Seconds())
 		return "", fmt.Errorf("no choices in response")
+	}
+
+	// Record metrics on success
+	metrics.LLMCallDuration.WithLabelValues(agentName, c.config.Provider, c.config.Model).Observe(time.Since(start).Seconds())
+	if chatResp.Usage.TotalTokens > 0 {
+		metrics.LLMCallTokens.WithLabelValues(agentName, c.config.Provider, "input").Add(float64(chatResp.Usage.PromptTokens))
+		metrics.LLMCallTokens.WithLabelValues(agentName, c.config.Provider, "output").Add(float64(chatResp.Usage.CompletionTokens))
 	}
 
 	return chatResp.Choices[0].Message.Content, nil

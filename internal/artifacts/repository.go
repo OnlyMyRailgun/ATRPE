@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/your-org/atrpe/internal/objectstore"
+	"github.com/OnlyMyRailgun/ATRPE/internal/objectstore"
 )
 
 // ArtifactMetaStore is the subset of KnowledgeStore needed by Repository.

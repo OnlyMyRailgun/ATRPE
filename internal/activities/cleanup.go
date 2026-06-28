@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 // CleanupWorkspaceInput specifies which workspace to clean up.

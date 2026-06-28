@@ -14,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/google/uuid"
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 // PublishInput holds all data needed for the publish step.
@@ -79,16 +79,16 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 	branchName := fmt.Sprintf("atrpe/%s", draft.Slug)
 	branchRef := plumbing.NewBranchReferenceName(branchName)
 	headRef, _ := zennRepo.Head()
-	zennRepo.CreateBranch(&config.Branch{Name: branchName, Remote: "origin"})
+	_ = zennRepo.CreateBranch(&config.Branch{Name: branchName, Remote: "origin"})
 
 	wt, _ := zennRepo.Worktree()
-	wt.Checkout(&git.CheckoutOptions{Branch: branchRef})
+	_ = wt.Checkout(&git.CheckoutOptions{Branch: branchRef})
 
 	// 6. Write article
 	articlePath := filepath.Join(tmpDir, "articles", draft.Slug+".md")
-	os.MkdirAll(filepath.Dir(articlePath), 0755)
-	os.WriteFile(articlePath, []byte(markdown), 0644)
-	wt.Add(fmt.Sprintf("articles/%s.md", draft.Slug))
+	_ = os.MkdirAll(filepath.Dir(articlePath), 0755)
+	_ = os.WriteFile(articlePath, []byte(markdown), 0644)
+	_, _ = wt.Add(fmt.Sprintf("articles/%s.md", draft.Slug))
 
 	// 7. Commit
 	commit, err := wt.Commit(fmt.Sprintf("ATRPE: publish %s", draft.Title), &git.CommitOptions{

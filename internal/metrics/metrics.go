@@ -47,4 +47,10 @@ var (
 		Name: "atrpe_discovery_topics_total",
 		Help: "Total topics discovered by source.",
 	}, []string{"source"})
+
+	// LLMCallTokens counts tokens consumed by LLM calls.
+	LLMCallTokens = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "atrpe_llm_tokens_total",
+		Help: "Total tokens consumed by LLM calls.",
+	}, []string{"agent", "provider", "direction"}) // "input" | "output"
 )

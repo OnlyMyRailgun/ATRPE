@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -73,6 +73,9 @@ type ArticleWorkflowState struct {
 
 	// Discovered candidates — stored temporarily for audit → issue flow.
 	cachedCandidates []topicCandidate
+
+	// Experiment workspace path for cleanup on terminal states.
+	WorkspacePath string
 }
 
 func (s *ArticleWorkflowState) Candidates() []topicCandidate {
@@ -121,10 +124,29 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 		}
 	}
 
+	// Clean up experiment workspace on terminal states
+	if s.WorkspacePath != "" {
+		outcome := "success"
+		if s.State == StateFailed {
+			outcome = "failure"
+		} else if s.State == StateAborted {
+			outcome = "abort"
+		}
+		ctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: time.Minute,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+		})
+		_ = workflow.ExecuteActivity(ctx, "CleanupWorkspace", map[string]interface{}{
+			"workdir": s.WorkspacePath,
+			"outcome": outcome,
+		}).Get(ctx, nil)
+	}
+
 	return nil
 }
 
 func setState(ctx workflow.Context, state WorkflowState) {
+	//nolint:staticcheck
 	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
 		"workflow_state": string(state),
 	})
@@ -170,7 +192,7 @@ func comment(ctx workflow.Context, issueNumber int, body string) {
 		StartToCloseTimeout: 30 * time.Second,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
-	workflow.ExecuteActivity(ctx, "PostComment", map[string]interface{}{
+	_ = workflow.ExecuteActivity(ctx, "PostComment", map[string]interface{}{
 		"issue_number": issueNumber,
 		"body":         body,
 	}).Get(ctx, nil)
@@ -278,11 +300,12 @@ func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 
 	// Resolve candidate ID (handles numeric positions like "1")
 	var resolved struct{ CandidateID string `json:"candidate_id"` }
-	workflow.ExecuteActivity(ctx, "ResolveCandidateID", map[string]interface{}{
+	_ = workflow.ExecuteActivity(ctx, "ResolveCandidateID", map[string]interface{}{
 		"selection": s.CandidateID,
 	}).Get(ctx, &resolved)
 	s.CandidateID = resolved.CandidateID
 
+	//nolint:staticcheck
 	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
 		"topic_id": s.CandidateID,
 	})
@@ -351,6 +374,7 @@ func runExperiment(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflow
 		return s
 	}
 	s.ExperimentResult = result
+	s.WorkspacePath = result.Environment.Workdir
 
 	// Report experiment outcomes
 	passCount, failCount := 0, 0
@@ -490,6 +514,7 @@ func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWor
 	}
 	s.LastDraft = draft
 
+	//nolint:staticcheck
 	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
 		"article_slug": draft.Slug,
 	})

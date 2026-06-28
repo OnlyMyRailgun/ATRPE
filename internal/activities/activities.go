@@ -15,13 +15,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/your-org/atrpe/internal/agents"
-	"github.com/your-org/atrpe/internal/artifacts"
-	"github.com/your-org/atrpe/internal/config"
-	"github.com/your-org/atrpe/internal/github"
-	"github.com/your-org/atrpe/internal/knowledge"
-	"github.com/your-org/atrpe/internal/objectstore"
-	"github.com/your-org/atrpe/internal/topics"
+	"github.com/OnlyMyRailgun/ATRPE/internal/agents"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/config"
+	"github.com/OnlyMyRailgun/ATRPE/internal/github"
+	"github.com/OnlyMyRailgun/ATRPE/internal/knowledge"
+	"github.com/OnlyMyRailgun/ATRPE/internal/objectstore"
+	"github.com/OnlyMyRailgun/ATRPE/internal/topics"
 )
 
 // Activities bundles all Temporal activities with their dependencies.
@@ -109,7 +109,7 @@ func (a *Activities) DiscoverTopics(ctx context.Context) (*DiscoverTopicsResult,
 	}
 	// Store all candidates in SQLite
 	for _, c := range candidates {
-		a.Store.SaveTopicCandidate(ctx, c)
+		_ = a.Store.SaveTopicCandidate(ctx, c)
 	}
 	// Return top 5
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
@@ -303,7 +303,7 @@ func (a *Activities) RunExperiment(ctx context.Context, input ExperimentInput) (
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "experiment_results", result.ArtifactID.String(), result.TopicID, result)
+	_, _ = repo.SaveArtifact(ctx, "experiment_results", result.ArtifactID.String(), result.TopicID, result)
 	return &result, nil
 }
 
@@ -321,7 +321,7 @@ func (a *Activities) VerifyExperiment(ctx context.Context, input VerifyInput) (*
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "verification_reports", report.ArtifactID.String(), report.TopicID, report)
+	_, _ = repo.SaveArtifact(ctx, "verification_reports", report.ArtifactID.String(), report.TopicID, report)
 	return &report, nil
 }
 
@@ -338,7 +338,7 @@ func (a *Activities) PatchExperiment(ctx context.Context, input PatchExperimentI
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "patch_results", patch.ArtifactID.String(), patch.TopicID, patch)
+	_, _ = repo.SaveArtifact(ctx, "patch_results", patch.ArtifactID.String(), patch.TopicID, patch)
 	return &patch, nil
 }
 
@@ -350,7 +350,7 @@ func (a *Activities) UpdateDesign(ctx context.Context, input UpdateDesignInput) 
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "design_artifacts", updated.ArtifactID.String(), updated.TopicID, updated)
+	_, _ = repo.SaveArtifact(ctx, "design_artifacts", updated.ArtifactID.String(), updated.TopicID, updated)
 	return &updated, nil
 }
 
@@ -385,7 +385,7 @@ func (a *Activities) GenerateDraft(ctx context.Context, input GenerateDraftInput
 	}
 
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
+	_, _ = repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
 
 	// Generate secondary language draft if bilingual is enabled
 	if getEnvBool("BILINGUAL_ARTICLES", false) {
@@ -396,7 +396,7 @@ func (a *Activities) GenerateDraft(ctx context.Context, input GenerateDraftInput
 		secondaryAgent := agents.NewWriterAgentWithLanguage(a.LLM, secondaryLang)
 		enDraft, enErr := secondaryAgent.Run(ctx, input.Brief, input.Result, input.Report, input.ChangeNotes)
 		if enErr == nil {
-			repo.SaveArtifact(ctx, "article_drafts", enDraft.ArtifactID.String(), enDraft.TopicID, enDraft)
+			_, _ = repo.SaveArtifact(ctx, "article_drafts", enDraft.ArtifactID.String(), enDraft.TopicID, enDraft)
 			fmt.Printf("✅ Generated %s secondary draft: %s\n", secondaryLang, enDraft.Slug)
 		} else {
 			fmt.Printf("⚠️ Secondary language (%s) generation failed: %v\n", secondaryLang, enErr)
@@ -429,7 +429,7 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 		return nil, fmt.Errorf("get main ref: %w", err)
 	}
 	var ref struct{ Object struct{ SHA string `json:"sha"` } `json:"object"` }
-	json.Unmarshal(mainRef, &ref)
+	_ = json.Unmarshal(mainRef, &ref)
 
 	// 2. Create branch from main
 	createRefPayload := fmt.Sprintf(`{"ref":"refs/heads/%s","sha":"%s"}`, branchName, ref.Object.SHA)
@@ -460,7 +460,7 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 	}
 
 	var prResult struct{ HTMLURL string `json:"html_url"` }
-	json.Unmarshal(prResp, &prResult)
+	_ = json.Unmarshal(prResp, &prResult)
 
 	return &CreateArticlePRResult{PRURL: prResult.HTMLURL}, nil
 }

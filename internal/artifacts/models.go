@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/your-org/atrpe/internal/objectstore"
+	"github.com/OnlyMyRailgun/ATRPE/internal/objectstore"
 )
 
 // URI is an alias for objectstore.URI for convenience.

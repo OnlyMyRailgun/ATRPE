@@ -8,12 +8,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/your-org/atrpe/internal/activities"
-	"github.com/your-org/atrpe/internal/config"
-	"github.com/your-org/atrpe/internal/github"
-	"github.com/your-org/atrpe/internal/knowledge"
-	"github.com/your-org/atrpe/internal/objectstore"
-	"github.com/your-org/atrpe/internal/workflows"
+	"github.com/OnlyMyRailgun/ATRPE/internal/activities"
+	"github.com/OnlyMyRailgun/ATRPE/internal/config"
+	"github.com/OnlyMyRailgun/ATRPE/internal/github"
+	"github.com/OnlyMyRailgun/ATRPE/internal/knowledge"
+	"github.com/OnlyMyRailgun/ATRPE/internal/objectstore"
+	"github.com/OnlyMyRailgun/ATRPE/internal/workflows"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/log"
 	sdkworker "go.temporal.io/sdk/worker"
@@ -62,6 +62,7 @@ func main() {
 	})
 
 	w.RegisterWorkflow(workflows.ArticleWorkflow)
+	w.RegisterWorkflow(workflows.EngagementCollectionWorkflow)
 	w.RegisterActivity(acts.DiscoverTopics)
 	w.RegisterActivity(acts.AuditTopics)
 	w.RegisterActivity(acts.CreateTopicIssue)
@@ -90,6 +91,24 @@ func main() {
 	if err := w.Start(); err != nil {
 		logger.Error("worker start failed", "error", err)
 		os.Exit(1)
+	}
+
+	// Register daily engagement collection schedule (JST 09:00)
+	_, err = c.ScheduleClient().Create(context.Background(), client.ScheduleOptions{
+		ID: "engagement-collector",
+		Spec: client.ScheduleSpec{
+			CronExpressions: []string{"0 0 * * *"}, // 00:00 UTC = 09:00 JST
+		},
+		Action: &client.ScheduleWorkflowAction{
+			ID:        "engagement-collector-wf",
+			Workflow:  workflows.EngagementCollectionWorkflow,
+			TaskQueue: cfg.TemporalTaskQueue,
+		},
+	})
+	if err != nil {
+		logger.Warn("engagement schedule registration failed (may already exist)", "error", err)
+	} else {
+		logger.Info("engagement schedule registered — daily at 09:00 JST")
 	}
 
 	quit := make(chan os.Signal, 1)

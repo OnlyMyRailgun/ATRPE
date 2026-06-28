@@ -78,5 +78,5 @@ func (h *InternalSignalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	resp, _ := json.Marshal(map[string]string{"status": "ok"})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(resp)
+	_, _ = w.Write(resp)
 }

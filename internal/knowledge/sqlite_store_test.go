@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 func setupStore(t *testing.T) *SQLiteStore {
@@ -49,7 +49,9 @@ func TestListTopicCandidates(t *testing.T) {
 		{ID: "b", Source: "s2", Title: "T2", URL: "u2", Score: 0.5, CreatedAt: time.Now()},
 		{ID: "c", Source: "s3", Title: "T3", URL: "u3", Score: 0.1, CreatedAt: time.Now()},
 	} {
-		store.SaveTopicCandidate(ctx, c)
+		if err := store.SaveTopicCandidate(ctx, c); err != nil {
+			t.Fatalf("SaveTopicCandidate error: %v", err)
+		}
 	}
 
 	list, err := store.ListTopicCandidates(ctx, 2)

@@ -9,7 +9,7 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
-	"github.com/your-org/atrpe/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
 // WriterAgent generates Zenn-formatted technical articles.
@@ -216,6 +216,51 @@ func extractFirstHeading(md string) string {
 		}
 	}
 	return ""
+}
+
+// QualitySelfAssessment is a 5-dimension rubric score produced by the writer.
+type QualitySelfAssessment struct {
+	Depth         int    `json:"depth"`         // 1-5: goes beyond surface level
+	CodeQuality   int    `json:"code_quality"`  // 1-5: minimal, correct, runnable
+	Structure     int    `json:"structure"`     // 1-5: logical section flow
+	Novelty       int    `json:"novelty"`       // 1-5: different from existing articles
+	Actionability int    `json:"actionability"` // 1-5: reader can apply immediately
+	Summary       string `json:"summary"`       // one-line verdict
+}
+
+// AssessQuality runs a 5-dimension self-assessment on the generated draft.
+func (a *WriterAgent) AssessQuality(ctx context.Context, draft artifacts.ArticleDraft) (QualitySelfAssessment, error) {
+	prompt := fmt.Sprintf(`You are evaluating your own article. Rate each dimension 1-5:
+
+Article:
+%s
+
+Output a JSON object:
+{
+  "depth": 4,
+  "code_quality": 5,
+  "structure": 4,
+  "novelty": 3,
+  "actionability": 5,
+  "summary": "Strong code examples but could go deeper on architecture rationale"
+}
+
+Be honest. If code blocks are generated (not from real experiment output), score code_quality low.
+If sections are boilerplate, score structure low.`, draft.Body)
+
+	resp, err := a.llm.ChatWithTemp(ctx, []ChatMessage{
+		{Role: "user", Content: prompt},
+	}, 0.2, 512)
+	if err != nil {
+		return QualitySelfAssessment{}, fmt.Errorf("quality self-assessment llm call: %w", err)
+	}
+
+	resp = extractJSON(resp)
+	var assessment QualitySelfAssessment
+	if err := json.Unmarshal([]byte(resp), &assessment); err != nil {
+		return QualitySelfAssessment{Summary: "assessment parse failed"}, nil
+	}
+	return assessment, nil
 }
 
 func slugify(title string) string {
