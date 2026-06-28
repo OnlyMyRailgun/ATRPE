@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/your-org/atrpe/internal/artifacts"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -13,21 +14,22 @@ import (
 type WorkflowState string
 
 const (
-	StateDiscover           WorkflowState = "DISCOVER"
-	StateWaitTopicSelection WorkflowState = "WAIT_TOPIC_SELECTION"
-	StateResearch           WorkflowState = "RESEARCH"
-	StateDesign             WorkflowState = "DESIGN"
-	StateExperiment         WorkflowState = "EXPERIMENT"
-	StateVerify             WorkflowState = "VERIFY"
-	StateGenerateArticle    WorkflowState = "GENERATE_ARTICLE"
+	StateDiscover            WorkflowState = "DISCOVER"
+	StateContentAudit        WorkflowState = "CONTENT_AUDIT"
+	StateWaitTopicSelection  WorkflowState = "WAIT_TOPIC_SELECTION"
+	StateResearch            WorkflowState = "RESEARCH"
+	StateDesign              WorkflowState = "DESIGN"
+	StateExperiment          WorkflowState = "EXPERIMENT"
+	StateVerify              WorkflowState = "VERIFY"
+	StateGenerateArticle     WorkflowState = "GENERATE_ARTICLE"
 	StateWaitPublishApproval WorkflowState = "WAIT_PUBLISH_APPROVAL"
-	StatePublish            WorkflowState = "PUBLISH"
-	StatePatchGeneration    WorkflowState = "PATCH_GENERATION"
-	StateDesignUpdate       WorkflowState = "DESIGN_UPDATE"
-	StateEscalated          WorkflowState = "ESCALATED"
-	StateCompleted          WorkflowState = "COMPLETED"
-	StateFailed             WorkflowState = "FAILED"
-	StateAborted            WorkflowState = "ABORTED"
+	StatePublish             WorkflowState = "PUBLISH"
+	StatePatchGeneration     WorkflowState = "PATCH_GENERATION"
+	StateDesignUpdate        WorkflowState = "DESIGN_UPDATE"
+	StateEscalated           WorkflowState = "ESCALATED"
+	StateCompleted           WorkflowState = "COMPLETED"
+	StateFailed              WorkflowState = "FAILED"
+	StateAborted             WorkflowState = "ABORTED"
 )
 
 // Signal types
@@ -56,6 +58,25 @@ type ArticleWorkflowState struct {
 	ChangeNotes      string
 	RemediationCount int
 	MaxRemediation   int
+
+	// Artifact chain — carried across state transitions.
+	Brief              artifacts.TechnicalBrief
+	Design             artifacts.DesignArtifact
+	ExperimentResult   artifacts.ExperimentResult
+	VerificationReport artifacts.VerificationReport
+	LastPatch          artifacts.PatchResult
+	LastDraft          artifacts.ArticleDraft
+
+	// Content audit results — set after CONTENT_AUDIT stage.
+	AuditPasses  map[string]bool   // candidateID → passes
+	AuditDetails map[string]string // candidateID → decision sheet detail
+
+	// Discovered candidates — stored temporarily for audit → issue flow.
+	cachedCandidates []topicCandidate
+}
+
+func (s *ArticleWorkflowState) Candidates() []topicCandidate {
+	return s.cachedCandidates
 }
 
 // ArticleWorkflow orchestrates the full article lifecycle.
@@ -69,12 +90,12 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 		s.MaxRemediation = 3
 	}
 
-	// Search attributes deferred (needs Temporal namespace config)
-
 	for s.State != StateCompleted && s.State != StateFailed && s.State != StateAborted {
 		switch s.State {
 		case StateDiscover:
 			s = runDiscover(ctx, s)
+		case StateContentAudit:
+			s = runContentAudit(ctx, s)
 		case StateWaitTopicSelection:
 			s = runWaitTopicSelection(ctx, s)
 		case StateResearch:
@@ -104,7 +125,9 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 }
 
 func setState(ctx workflow.Context, state WorkflowState) {
-	// Search attributes deferred — register in Temporal namespace first
+	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
+		"workflow_state": string(state),
+	})
 }
 
 func defaultActivityOptions() workflow.ActivityOptions {
@@ -119,7 +142,18 @@ func defaultActivityOptions() workflow.ActivityOptions {
 	}
 }
 
-// State handler stubs — to be wired to activities in Week 2
+// longActivityOptions gives more time for LLM-heavy activities.
+func longActivityOptions() workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		StartToCloseTimeout: 20 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumInterval:    2 * time.Minute,
+			MaximumAttempts:    2,
+		},
+	}
+}
 
 // topicCandidate is a lightweight copy of the activity result for JSON deserialization.
 type topicCandidate struct {
@@ -130,15 +164,11 @@ type topicCandidate struct {
 	URL    string  `json:"url"`
 }
 
-type topicCandidateBrief struct {
-	CoreConcepts []string `json:"core_concepts"`
-}
-
 // comment posts a progress update on the GitHub issue. Non-blocking on failure.
 func comment(ctx workflow.Context, issueNumber int, body string) {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
-		RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
 	workflow.ExecuteActivity(ctx, "PostComment", map[string]interface{}{
 		"issue_number": issueNumber,
@@ -159,15 +189,62 @@ func runDiscover(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 		return s
 	}
 
+	s.cachedCandidates = discoverResult.Candidates
+
+	workflow.GetLogger(ctx).Info("discovery complete", "candidate_count", len(discoverResult.Candidates))
+	s.State = StateContentAudit
+	setState(ctx, StateContentAudit)
+	return s
+}
+
+// runContentAudit runs the content audit activity and creates the decision sheet issue.
+func runContentAudit(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	ctx = workflow.WithActivityOptions(ctx, longActivityOptions())
+
+	workflow.GetLogger(ctx).Info("running content audit")
+
+	var auditResult struct {
+		Audits []struct {
+			CandidateID     string  `json:"candidate_id"`
+			Passes          bool    `json:"passes"`
+			FailReason      string  `json:"fail_reason,omitempty"`
+			Recommendation  float64 `json:"recommendation"`
+			WhyNow          string  `json:"why_now"`
+			SaturationLevel string  `json:"saturation_level"`
+			Differentiation string  `json:"differentiation"`
+			ExistingGaps    string  `json:"existing_gaps"`
+			TestablePart    string  `json:"testable_part"`
+			Risks           string  `json:"risks"`
+			SuggestedTitle  string  `json:"suggested_title"`
+			DontWriteReason string  `json:"dont_write_reason"`
+			ExistingCount   int     `json:"existing_count"`
+			OwnOverlap      bool    `json:"own_overlap"`
+		} `json:"audits"`
+	}
+
+	err := workflow.ExecuteActivity(ctx, "AuditTopics", map[string]interface{}{
+		"candidates": struct{ Candidates []topicCandidate }{
+			Candidates: s.Candidates(),
+		},
+	}).Get(ctx, &auditResult)
+	if err != nil {
+		workflow.GetLogger(ctx).Warn("AuditTopics failed, proceeding without audit", "error", err)
+		// Degrade gracefully — create a basic issue without audit data
+		s.State = StateWaitTopicSelection
+		setState(ctx, StateWaitTopicSelection)
+		return s
+	}
+
+	// Create decision sheet issue with audit data
 	var issueResult struct {
 		IssueURL    string `json:"issue_url"`
 		IssueNumber int    `json:"issue_number"`
 	}
 	err = workflow.ExecuteActivity(ctx, "CreateTopicIssue", map[string]interface{}{
-		"candidates": discoverResult.Candidates,
+		"candidates": s.Candidates(),
+		"audits":     auditResult.Audits,
 	}).Get(ctx, &issueResult)
 
-	// Use the real issue number if available
 	if issueResult.IssueNumber > 0 {
 		s.IssueNumber = issueResult.IssueNumber
 	}
@@ -197,7 +274,7 @@ func runWaitTopicSelection(ctx workflow.Context, s ArticleWorkflowState) Article
 }
 
 func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	ctx = workflow.WithActivityOptions(ctx, longActivityOptions())
 
 	// Resolve candidate ID (handles numeric positions like "1")
 	var resolved struct{ CandidateID string `json:"candidate_id"` }
@@ -206,9 +283,13 @@ func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 	}).Get(ctx, &resolved)
 	s.CandidateID = resolved.CandidateID
 
+	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
+		"topic_id": s.CandidateID,
+	})
+
 	comment(ctx, s.IssueNumber, fmt.Sprintf("🔍 Selected `%s`, starting research...", s.CandidateID))
 
-	var brief topicCandidateBrief
+	var brief artifacts.TechnicalBrief
 	err := workflow.ExecuteActivity(ctx, "ResearchTopic", map[string]interface{}{
 		"candidate_id": s.CandidateID,
 	}).Get(ctx, &brief)
@@ -217,6 +298,7 @@ func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 		s.State = StateFailed
 		return s
 	}
+	s.Brief = brief
 
 	comment(ctx, s.IssueNumber, fmt.Sprintf("✅ Research complete. %d core concepts identified.", len(brief.CoreConcepts)))
 	s.State = StateDesign
@@ -225,57 +307,180 @@ func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 }
 
 func runDesign(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	ctx = workflow.WithActivityOptions(ctx, longActivityOptions())
 	comment(ctx, s.IssueNumber, "🏗️ Designing architecture...")
 
-	var design struct {
-		Components []struct {
-			Name string `json:"name"`
-			Type string `json:"type"`
-		} `json:"components"`
-	}
+	var design artifacts.DesignArtifact
 	err := workflow.ExecuteActivity(ctx, "DesignArchitecture", map[string]interface{}{
-		"brief": map[string]interface{}{"topic_id": s.CandidateID},
+		"brief": s.Brief,
 	}).Get(ctx, &design)
 	if err != nil {
 		workflow.GetLogger(ctx).Error("DesignArchitecture failed", "error", err)
 		s.State = StateFailed
 		return s
 	}
+	s.Design = design
 
 	names := make([]string, len(design.Components))
 	for i, c := range design.Components {
 		names[i] = fmt.Sprintf("%s (%s)", c.Name, c.Type)
 	}
-	comment(ctx, s.IssueNumber, fmt.Sprintf("🏗️ Design ready: %d components — %s", len(design.Components), strings.Join(names, ", ")))
+	comment(ctx, s.IssueNumber, fmt.Sprintf("🏗️ Design ready: %d components — %s\nTest plan: %s",
+		len(design.Components),
+		strings.Join(names, ", "),
+		design.TestPlan.Strategy,
+	))
 	s.State = StateExperiment
 	setState(ctx, StateExperiment)
 	return s
 }
 
+// runExperiment calls RunExperiment activity, stores the result, and transitions to VERIFY.
 func runExperiment(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	// MVP: skip experiment, go straight to article generation
-	comment(ctx, s.IssueNumber, "🧪 Experiment skipped (MVP), proceeding to article generation...")
-	s.State = StateGenerateArticle
-	setState(ctx, StateGenerateArticle)
-	return s
-}
+	ctx = workflow.WithActivityOptions(ctx, longActivityOptions())
+	comment(ctx, s.IssueNumber, "🧪 Running experiment — generating and validating code...")
 
-func runVerify(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	s.State = StateGenerateArticle
-	return s
-}
-
-func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
-	comment(ctx, s.IssueNumber, "✍️ Writing article draft...")
-
-	var draft struct {
-		Slug  string `json:"slug"`
-		Title string `json:"title"`
-		Body  string `json:"body"`
+	var result artifacts.ExperimentResult
+	err := workflow.ExecuteActivity(ctx, "RunExperiment", map[string]interface{}{
+		"design": s.Design,
+	}).Get(ctx, &result)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("RunExperiment failed", "error", err)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("❌ Experiment failed: %v", err))
+		s.State = StateFailed
+		return s
 	}
+	s.ExperimentResult = result
+
+	// Report experiment outcomes
+	passCount, failCount := 0, 0
+	for _, cmd := range result.Commands {
+		if cmd.ExitCode == 0 {
+			passCount++
+		} else {
+			failCount++
+		}
+	}
+	comment(ctx, s.IssueNumber, fmt.Sprintf(
+		"🧪 Experiment complete: %d commands run (%d pass, %d fail, %dms).",
+		len(result.Commands), passCount, failCount,
+		result.Commands[len(result.Commands)-1].DurationMS,
+	))
+
+	s.State = StateVerify
+	setState(ctx, StateVerify)
+	return s
+}
+
+// runVerify checks the experiment result and branches to GENERATE_ARTICLE or remediation.
+func runVerify(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "🔬 Verifying experiment results...")
+
+	var report artifacts.VerificationReport
+	err := workflow.ExecuteActivity(ctx, "VerifyExperiment", map[string]interface{}{
+		"brief":  s.Brief,
+		"result": s.ExperimentResult,
+	}).Get(ctx, &report)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("VerifyExperiment failed", "error", err)
+		s.State = StateFailed
+		return s
+	}
+	s.VerificationReport = report
+
+	if report.OverallPassed {
+		comment(ctx, s.IssueNumber, "✅ Verification PASSED — proceeding to article generation.")
+		s.State = StateGenerateArticle
+		setState(ctx, StateGenerateArticle)
+		return s
+	}
+
+	// Verification failed — check remediation budget
+	s.RemediationCount++
+	if s.RemediationCount <= s.MaxRemediation {
+		comment(ctx, s.IssueNumber, fmt.Sprintf(
+			"⚠️ Verification FAILED (attempt %d/%d).\nBlocking issues:\n%s\n\nEntering remediation loop...",
+			s.RemediationCount, s.MaxRemediation,
+			formatIssues(report.BlockingIssues),
+		))
+		s.State = StatePatchGeneration
+		setState(ctx, StatePatchGeneration)
+	} else {
+		comment(ctx, s.IssueNumber, fmt.Sprintf(
+			"🚨 Verification FAILED after %d attempts.\nBlocking issues:\n%s\n\nWorkflow ESCALATED — manual intervention required.",
+			s.MaxRemediation, formatIssues(report.BlockingIssues),
+		))
+		s.State = StateEscalated
+		setState(ctx, StateEscalated)
+	}
+	return s
+}
+
+// runPatchGeneration calls ExperimentAgent.Patch to fix code issues.
+func runPatchGeneration(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	ctx = workflow.WithActivityOptions(ctx, longActivityOptions())
+	comment(ctx, s.IssueNumber, fmt.Sprintf("🔧 Generating patch (attempt %d/%d)...", s.RemediationCount, s.MaxRemediation))
+
+	var patch artifacts.PatchResult
+	err := workflow.ExecuteActivity(ctx, "PatchExperiment", map[string]interface{}{
+		"design": s.Design,
+		"result": s.ExperimentResult,
+	}).Get(ctx, &patch)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("PatchExperiment failed", "error", err)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("❌ Patch generation failed: %v", err))
+		s.State = StateFailed
+		return s
+	}
+	s.LastPatch = patch
+
+	patchedNames := make([]string, len(patch.PatchedFiles))
+	for i, f := range patch.PatchedFiles {
+		patchedNames[i] = f.Path
+	}
+	comment(ctx, s.IssueNumber, fmt.Sprintf(
+		"🔧 Patch generated: %d files changed — %s",
+		len(patch.PatchedFiles), strings.Join(patchedNames, ", "),
+	))
+	s.State = StateDesignUpdate
+	setState(ctx, StateDesignUpdate)
+	return s
+}
+
+// runDesignUpdate calls DesignAgent.Update to align design with patched code.
+func runDesignUpdate(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	ctx = workflow.WithActivityOptions(ctx, longActivityOptions())
+	comment(ctx, s.IssueNumber, "📐 Updating design from patch feedback...")
+
+	var updated artifacts.DesignArtifact
+	err := workflow.ExecuteActivity(ctx, "UpdateDesign", map[string]interface{}{
+		"design": s.Design,
+		"patch":  s.LastPatch,
+	}).Get(ctx, &updated)
+	if err != nil {
+		workflow.GetLogger(ctx).Warn("UpdateDesign failed, reusing current design", "error", err)
+		// Non-fatal: continue with existing design
+	} else {
+		s.Design = updated
+	}
+
+	comment(ctx, s.IssueNumber, "📐 Design updated — re-running experiment with fixes.")
+	s.State = StateExperiment
+	setState(ctx, StateExperiment)
+	return s
+}
+
+// runGenerateArticle generates the article draft with the full artifact chain.
+func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	ctx = workflow.WithActivityOptions(ctx, longActivityOptions())
+	comment(ctx, s.IssueNumber, "✍️ Writing article draft from verified experiment...")
+
+	var draft artifacts.ArticleDraft
 	err := workflow.ExecuteActivity(ctx, "GenerateDraft", map[string]interface{}{
+		"brief":        s.Brief,
+		"result":       s.ExperimentResult,
+		"report":       s.VerificationReport,
 		"change_notes": s.ChangeNotes,
 	}).Get(ctx, &draft)
 	if err != nil {
@@ -283,17 +488,18 @@ func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWor
 		s.State = StateFailed
 		return s
 	}
+	s.LastDraft = draft
+
+	_ = workflow.UpsertSearchAttributes(ctx, map[string]interface{}{
+		"article_slug": draft.Slug,
+	})
 
 	// Create PR
 	comment(ctx, s.IssueNumber, fmt.Sprintf("📝 Article draft generated: **%s**\n\nCreating PR for review...", draft.Title))
 
 	var prResult struct{ PRURL string `json:"pr_url"` }
 	err = workflow.ExecuteActivity(ctx, "CreateArticlePR", map[string]interface{}{
-		"draft": map[string]interface{}{
-			"slug":  draft.Slug,
-			"title": draft.Title,
-			"body":  draft.Body,
-		},
+		"draft":        draft,
 		"issue_number": s.IssueNumber,
 	}).Get(ctx, &prResult)
 	if err != nil {
@@ -334,22 +540,44 @@ func runWaitPublishApproval(ctx workflow.Context, s ArticleWorkflowState) Articl
 }
 
 func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	s.State = StateCompleted
-	return s
-}
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "🚀 Publishing article to Zenn...")
 
-func runPatchGeneration(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	s.RemediationCount++
-	s.State = StateDesignUpdate
-	return s
-}
+	var pubResult struct {
+		Slug      string `json:"slug"`
+		PRURL     string `json:"pr_url"`
+		Merged    bool   `json:"merged"`
+		Escalated bool   `json:"escalated"`
+	}
+	err := workflow.ExecuteActivity(ctx, "PublishArticle", map[string]interface{}{
+		"draft": s.LastDraft,
+	}).Get(ctx, &pubResult)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("PublishArticle failed", "error", err)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("❌ Publish failed: %v", err))
+		s.State = StateEscalated
+		setState(ctx, StateEscalated)
+		return s
+	}
 
-func runDesignUpdate(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	s.State = StateExperiment
+	if pubResult.Escalated {
+		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ PR created but not merged: %s\nManual merge required. Reply `/retry` after merging.", pubResult.PRURL))
+		s.State = StateEscalated
+		setState(ctx, StateEscalated)
+	} else if pubResult.Merged {
+		comment(ctx, s.IssueNumber, fmt.Sprintf("🎉 Published! https://zenn.dev/articles/%s", pubResult.Slug))
+		s.State = StateCompleted
+		setState(ctx, StateCompleted)
+	} else {
+		comment(ctx, s.IssueNumber, fmt.Sprintf("📤 PR submitted: %s\nAwaiting merge.", pubResult.PRURL))
+		s.State = StateCompleted
+		setState(ctx, StateCompleted)
+	}
 	return s
 }
 
 func runEscalated(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	comment(ctx, s.IssueNumber, "⏸️ Workflow escalated — waiting for manual intervention.\nReply `/retry` to retry, or `/abort` to abort.")
 	sel := workflow.NewSelector(ctx)
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "RetrySignal"), func(c workflow.ReceiveChannel, more bool) {
 		c.Receive(ctx, &RetrySignal{})
@@ -361,4 +589,12 @@ func runEscalated(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowS
 	})
 	sel.Select(ctx)
 	return s
+}
+
+func formatIssues(issues []string) string {
+	var sb strings.Builder
+	for _, issue := range issues {
+		sb.WriteString(fmt.Sprintf("- %s\n", issue))
+	}
+	return sb.String()
 }

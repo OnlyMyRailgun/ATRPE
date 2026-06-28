@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Hard gate: code compiles ──────────────────────────────
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build
+        run: go build ./...
+
+  # ── Hard gate: all tests pass ─────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Test
+        run: go test -v -race -count=1 ./...
+
+  # ── Hard gate: static analysis ────────────────────────────
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Vet
+        run: go vet ./...
+
+  # ── Advisory: lint (non-blocking until golangci-lint ships Go 1.25 toolchain) ─
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  # ── Hard gate: article quality validation ─────────────────
+  article-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Article quality check
+        run: |
+          echo "::group::Article Quality Checks"
+
+          FAILED=0
+
+          # Frontmatter completeness for every .md in articles/
+          echo "::group::Frontmatter completeness"
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
+            echo "  Checking: $f"
+            if ! grep -q '^---$' "$f"; then
+              echo "  ❌ $f: missing frontmatter delimiter"
+              FAILED=1
+            fi
+            if ! grep -q 'published:' "$f"; then
+              echo "  ❌ $f: missing published: field"
+              FAILED=1
+            fi
+            if ! grep -q 'emoji:' "$f"; then
+              echo "  ❌ $f: missing emoji: field"
+              FAILED=1
+            fi
+            if ! grep -q 'type:' "$f"; then
+              echo "  ❌ $f: missing type: field"
+              FAILED=1
+            fi
+            if ! grep -q 'topics:' "$f"; then
+              echo "  ❌ $f: missing topics: field"
+              FAILED=1
+            fi
+          done
+          echo "::endgroup::"
+
+          # Placeholder detection
+          echo "::group::Placeholder detection"
+          PLACEHOLDERS=("[TODO]" "[WIP]" "[TBD]" "TODO:" "Lorem ipsum" "add more here")
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
+            for p in "${PLACEHOLDERS[@]}"; do
+              if grep -qi "$p" "$f"; then
+                echo "  ❌ $f: placeholder text detected: '$p'"
+                FAILED=1
+              fi
+            done
+          done
+          echo "::endgroup::"
+
+          # Code block minimum (at least 3)
+          echo "::group::Code block count"
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
+            FENCE_COUNT=$(grep -c '```' "$f" 2>/dev/null || echo 0)
+            FENCE_COUNT=$((FENCE_COUNT / 2))
+            if [ "$FENCE_COUNT" -lt 3 ]; then
+              echo "  ❌ $f: only $FENCE_COUNT code blocks — need at least 3"
+              FAILED=1
+            else
+              echo "  $f: $FENCE_COUNT code blocks ✅"
+            fi
+          done
+          echo "::endgroup::"
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "❌ Article quality checks FAILED. Fix issues above before merge."
+            exit 1
+          fi
+          echo ""
+          echo "✅ Article quality checks PASSED"
+          echo "::endgroup::"
+
+# ────────────────────────────────────────────────────────────
+# When branch protection is enabled on main, require:
+#   - build
+#   - test
+#   - vet
+#   - article-check
+# lint is optional until golangci-lint upgrades its Go toolchain to 1.25
+# ────────────────────────────────────────────────────────────

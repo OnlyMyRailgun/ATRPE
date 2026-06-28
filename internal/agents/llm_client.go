@@ -17,6 +17,39 @@ type LLMConfig struct {
 	Model    string
 	APIKey   string
 	BaseURL  string
+	// Per-agent temperature overrides. 0 means use per-call default.
+	TempResearch     float64
+	TempDesign       float64
+	TempCodeGen      float64
+	TempVerification float64
+	TempWriter       float64
+}
+
+// TempFor returns the temperature for a given agent name.
+func (c LLMConfig) TempFor(agent string) float64 {
+	switch agent {
+	case "research":
+		return firstNonZero(c.TempResearch, 0.1)
+	case "design":
+		return firstNonZero(c.TempDesign, 0.3)
+	case "codegen":
+		return firstNonZero(c.TempCodeGen, 0.2)
+	case "verification":
+		return firstNonZero(c.TempVerification, 0.0)
+	case "writer":
+		return firstNonZero(c.TempWriter, 0.5)
+	default:
+		return 0.3
+	}
+}
+
+func firstNonZero(vals ...float64) float64 {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0.3
 }
 
 // ChatMessage represents a single message in an LLM conversation.
@@ -51,12 +84,22 @@ func (c *LLMClient) Chat(ctx context.Context, messages []ChatMessage) (string, e
 	return c.ChatWithMaxTokens(ctx, messages, 8192)
 }
 
+// ChatWithAgent sends a conversation with the per-agent temperature.
+func (c *LLMClient) ChatWithAgent(ctx context.Context, messages []ChatMessage, agent string) (string, error) {
+	return c.ChatWithTemp(ctx, messages, c.config.TempFor(agent), 8192)
+}
+
 // ChatWithMaxTokens allows configuring the max output tokens.
 func (c *LLMClient) ChatWithMaxTokens(ctx context.Context, messages []ChatMessage, maxTokens int) (string, error) {
+	return c.ChatWithTemp(ctx, messages, 0.3, maxTokens)
+}
+
+// ChatWithTemp sends a conversation with a specific temperature and max tokens.
+func (c *LLMClient) ChatWithTemp(ctx context.Context, messages []ChatMessage, temperature float64, maxTokens int) (string, error) {
 	reqBody := map[string]interface{}{
 		"model":       c.config.Model,
 		"messages":    messages,
-		"temperature": 0.3,
+		"temperature": temperature,
 	}
 	if maxTokens > 0 {
 		reqBody["max_tokens"] = maxTokens
@@ -104,6 +147,11 @@ func (c *LLMClient) ChatWithMaxTokens(ctx context.Context, messages []ChatMessag
 
 // extractJSON finds the first JSON object in a string, stripping markdown code blocks.
 func extractJSON(s string) string {
+	return ExtractJSON(s)
+}
+
+// ExtractJSON finds the first JSON object in a string, stripping markdown code blocks.
+func ExtractJSON(s string) string {
 	// Strip markdown code blocks: ```json ... ``` or ``` ... ```
 	if idx := strings.Index(s, "```json"); idx >= 0 {
 		s = s[idx+7:]
