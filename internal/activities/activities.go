@@ -350,7 +350,7 @@ func (a *Activities) UpdateDesign(ctx context.Context, input UpdateDesignInput) 
 		return nil, err
 	}
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "design_artifacts", updated.ArtifactID.String(), updated.TopicID, updated)
+	_, _ = repo.SaveArtifact(ctx, "design_artifacts", updated.ArtifactID.String(), updated.TopicID, updated)
 	return &updated, nil
 }
 
@@ -385,7 +385,7 @@ func (a *Activities) GenerateDraft(ctx context.Context, input GenerateDraftInput
 	}
 
 	repo := artifacts.NewRepository(a.Store, a.Objects)
-	repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
+	_, _ = repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
 
 	// Generate secondary language draft if bilingual is enabled
 	if getEnvBool("BILINGUAL_ARTICLES", false) {
@@ -396,7 +396,7 @@ func (a *Activities) GenerateDraft(ctx context.Context, input GenerateDraftInput
 		secondaryAgent := agents.NewWriterAgentWithLanguage(a.LLM, secondaryLang)
 		enDraft, enErr := secondaryAgent.Run(ctx, input.Brief, input.Result, input.Report, input.ChangeNotes)
 		if enErr == nil {
-			repo.SaveArtifact(ctx, "article_drafts", enDraft.ArtifactID.String(), enDraft.TopicID, enDraft)
+			_, _ = repo.SaveArtifact(ctx, "article_drafts", enDraft.ArtifactID.String(), enDraft.TopicID, enDraft)
 			fmt.Printf("✅ Generated %s secondary draft: %s\n", secondaryLang, enDraft.Slug)
 		} else {
 			fmt.Printf("⚠️ Secondary language (%s) generation failed: %v\n", secondaryLang, enErr)

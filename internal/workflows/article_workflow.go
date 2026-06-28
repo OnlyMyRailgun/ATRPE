@@ -300,7 +300,7 @@ func runResearch(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSt
 
 	// Resolve candidate ID (handles numeric positions like "1")
 	var resolved struct{ CandidateID string `json:"candidate_id"` }
-	workflow.ExecuteActivity(ctx, "ResolveCandidateID", map[string]interface{}{
+	_ = workflow.ExecuteActivity(ctx, "ResolveCandidateID", map[string]interface{}{
 		"selection": s.CandidateID,
 	}).Get(ctx, &resolved)
 	s.CandidateID = resolved.CandidateID
