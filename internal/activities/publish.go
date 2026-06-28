@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
+	"github.com/OnlyMyRailgun/ATRPE/internal/objectstore"
 )
 
 // ── Types ──
@@ -89,7 +90,7 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 	markdown := buildZennMarkdown(draft)
 
 	if _, err := a.Objects.Put(ctx,
-		fmt.Sprintf("published/%s.md", draft.Slug),
+		fmt.Sprintf("pending_publish/%s.md", draft.Slug),
 		strings.NewReader(markdown),
 		"text/markdown",
 	); err != nil {
@@ -179,6 +180,15 @@ func (a *Activities) MergePublish(ctx context.Context, input MergePublishInput) 
 		Platform:    "zenn",
 		URL:         fmt.Sprintf("https://zenn.dev/articles/%s", input.Slug),
 	}
+	// 4: Move markdown from pending_publish → published in ObjectStore
+	if a.Objects != nil {
+		pendingKey := fmt.Sprintf("pending_publish/%s.md", input.Slug)
+		if reader, err := a.Objects.Get(ctx, objectstore.URI(pendingKey)); err == nil {
+			defer reader.Close()
+			_, _ = a.Objects.Put(ctx, fmt.Sprintf("published/%s.md", input.Slug), reader, "text/markdown")
+		}
+	}
+
 	return a.Store.SavePublishedArticle(ctx, published)
 }
 
@@ -230,7 +240,13 @@ func (a *Activities) VerifyPublishMerge(ctx context.Context, input VerifyPublish
 		return &VerifyPublishMergeResult{Merged: false, Message: "PR exists but is not merged"}, nil
 	}
 
-	// Verify head ref matches what we stored at publish time
+	// 2: Verify head SHA matches what we stored at publish time
+	if input.HeadSHA != "" && pr.Head.SHA != input.HeadSHA {
+		return &VerifyPublishMergeResult{
+			Merged: false,
+			Message: fmt.Sprintf("head SHA mismatch: stored %s, API returned %s", input.HeadSHA[:12], pr.Head.SHA[:12]),
+		}, nil
+	}
 	expectedRef := fmt.Sprintf("atrpe-publish/%s-N%d", input.Slug, input.PRNumber)
 	if pr.Head.Ref != expectedRef && input.HeadRef != "" && pr.Head.Ref != input.HeadRef {
 		return &VerifyPublishMergeResult{
@@ -363,15 +379,13 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 		return "", 0, "", ""
 	}
 
-	// ── PO: Only flip frontmatter. Preserve ALL human-edited body. ──
-	publishContent := strings.Replace(mainContent, "published: false", "published: true", 1)
-	if publishContent == mainContent {
-		publishContent = strings.Replace(mainContent, "published:false", "published:true", 1)
-	}
-	if publishContent == mainContent {
-		fmt.Printf("publish: could not find published:false in main content\n")
-		return "", 0, "", ""
-	}
+		// ── 1: YAML frontmatter parser — only touches the --- delimited block ──
+		// This prevents false matches if body text contains "published: false".
+		publishContent, flipped := flipFrontmatterPublished(mainContent)
+		if !flipped {
+			fmt.Printf("publish: could not flip published:false->true in frontmatter\n")
+			return "", 0, "", ""
+		}
 
 	filePayload, _ := json.Marshal(map[string]string{
 		"message": fmt.Sprintf("ATRPE: publish %s", draft.Title),
@@ -410,6 +424,35 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 	}
 
 	return prResult.HTMLURL, prResult.Number, prResult.Head.Ref, prResult.Head.SHA
+}
+
+// flipFrontmatterPublished finds the YAML frontmatter block (delimited by ---)
+// and flips "published: false" → "published: true" within that block only.
+// Returns (modified, true) on success; (original, false) if not found or already true.
+func flipFrontmatterPublished(md string) (string, bool) {
+	if !strings.HasPrefix(md, "---") {
+		return md, false
+	}
+	end := strings.Index(md[3:], "\n---")
+	if end < 0 {
+		return md, false
+	}
+	fmBlock := md[3 : 3+end]
+	rest := md[3+end:]
+
+	if strings.Contains(fmBlock, "published: true") || strings.Contains(fmBlock, "published:true") {
+		return md, false
+	}
+
+	newFM := strings.Replace(fmBlock, "published: false", "published: true", 1)
+	if newFM == fmBlock {
+		newFM = strings.Replace(fmBlock, "published:false", "published:true", 1)
+	}
+	if newFM == fmBlock {
+		return md, false
+	}
+
+	return "---" + newFM + rest, true
 }
 
 func buildZennMarkdown(draft artifacts.ArticleDraft) string {
