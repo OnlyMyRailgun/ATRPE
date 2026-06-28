@@ -2,8 +2,10 @@ package agents
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -89,10 +91,14 @@ func (a *WriterAgent) languageInstruction() string {
 
 // Run generates a Zenn article draft from the full artifact chain.
 func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, result artifacts.ExperimentResult, report artifacts.VerificationReport, changeNotes string) (artifacts.ArticleDraft, error) {
+	// Build file content excerpts from experiment workspace
+	fileContents := buildFileContents(result.GeneratedFiles, result.Environment.Workdir)
+
 	input := map[string]any{
 		"topic":            brief.CoreConcepts,
 		"claims":           brief.SupportedClaims,
-		"experiment_files": result.GeneratedFiles,
+		"experiment_files": fileContents,
+		"file_paths":       result.GeneratedFiles,
 		"commands":         result.Commands,
 		"verification": map[string]any{
 			"overall_passed":  report.OverallPassed,
@@ -207,6 +213,54 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 		Body:      body,
 	}, nil
 }
+
+// buildFileContents reads actual file content excerpts from the experiment workspace.
+// Small files are included in full; larger files get a content_excerpt with hash.
+func buildFileContents(filePaths []string, workdir string) []map[string]any {
+	var result []map[string]any
+	for _, path := range filePaths {
+		fullPath := workdir + "/" + path
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			result = append(result, map[string]any{
+				"path":    path,
+				"error":   err.Error(),
+			})
+			continue
+		}
+		content := string(data)
+		excerpt := content
+		if len(content) > 2000 {
+			excerpt = content[:2000] + "...[truncated]"
+		}
+		result = append(result, map[string]any{
+			"path":           path,
+			"language":       languageFromPath(path),
+			"content_excerpt": excerpt,
+			"content_hash":   fmt.Sprintf("%x", sha256.Sum256(data))[:16],
+			"full_content":   content,
+		})
+	}
+	return result
+}
+
+func languageFromPath(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".go"):
+		return "go"
+	case strings.HasSuffix(path, ".mod"):
+		return "go-mod"
+	case strings.HasSuffix(path, ".sum"):
+		return "go-sum"
+	case strings.HasSuffix(path, ".md"):
+		return "markdown"
+	case strings.HasSuffix(path, ".yml") || strings.HasSuffix(path, ".yaml"):
+		return "yaml"
+	default:
+		return "text"
+	}
+}
+
 
 func extractFirstHeading(md string) string {
 	for _, line := range strings.Split(md, "\n") {

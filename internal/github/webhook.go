@@ -111,7 +111,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("parsed command", "signal", cmd.Signal, "payload", cmd.Payload)
 
-	workflowID := fmt.Sprintf("article-%d", evt.Issue.Number)
+	workflowID := fmt.Sprintf("article-issue-%d", evt.Issue.Number)
 	if h.sender != nil {
 		if err := h.sender.SendSignal(r.Context(), workflowID, cmd.Signal, cmd.Payload); err != nil {
 			h.logger.Error("send signal", "error", err)
