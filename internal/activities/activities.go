@@ -349,6 +349,74 @@ func (a *Activities) PatchExperiment(ctx context.Context, input PatchExperimentI
 	return &patch, nil
 }
 
+// -- Verify Article Claims (Problem 8) --
+
+type VerifyArticleClaimsInput struct {
+	ArticleBody string                `json:"article_body"`
+	Brief       artifacts.TechnicalBrief `json:"brief"`
+}
+
+type VerifyArticleClaimsResult struct {
+	ClaimsMatched   int  `json:"claims_matched"`
+	ClaimsUnmatched int  `json:"claims_unmatched"`
+	Passed          bool `json:"passed"`
+}
+
+func (a *Activities) VerifyArticleClaims(ctx context.Context, input VerifyArticleClaimsInput) (*VerifyArticleClaimsResult, error) {
+	// P8: Extract claims from final article body and verify against sourced brief
+	rawClaims := agents.ExtractArticleClaims(input.ArticleBody)
+	briefClaims := append([]string{}, input.Brief.CoreConcepts...)
+	briefClaims = append(briefClaims, input.Brief.SupportedClaims...)
+	briefClaims = append(briefClaims, input.Brief.CommonPitfalls...)
+
+	// Build a keyword-token lookup from verified brief claims
+	briefKeywords := make(map[string]bool)
+	for _, c := range briefClaims {
+		for _, tok := range tokenizeClaim(c) {
+			if len(tok) > 3 {
+				briefKeywords[tok] = true
+			}
+		}
+	}
+
+	matched, unmatched := 0, 0
+	for _, claim := range rawClaims {
+		overlap := 0
+		for _, tok := range tokenizeClaim(claim) {
+			if briefKeywords[tok] {
+				overlap++
+			}
+		}
+		if overlap >= 2 { // need at least 2 keyword matches to a verified claim
+			matched++
+		} else {
+			unmatched++
+		}
+	}
+
+	passed := unmatched == 0
+	return &VerifyArticleClaimsResult{
+		ClaimsMatched:   matched,
+		ClaimsUnmatched: unmatched,
+		Passed:          passed,
+	}, nil
+}
+
+// tokenize splits text into lowercase word tokens (exported for reuse).
+func tokenizeClaim(s string) []string {
+	words := strings.Fields(strings.ToLower(s))
+	var tokens []string
+	seen := make(map[string]bool)
+	for _, w := range words {
+		w = strings.Trim(w, ".,;:'\"!?()[]{}-=<>/\\|@#$%^&*+")
+		if len(w) > 3 && !seen[w] {
+			seen[w] = true
+			tokens = append(tokens, w)
+		}
+	}
+	return tokens
+}
+
 // -- Update Design --
 
 func (a *Activities) UpdateDesign(ctx context.Context, input UpdateDesignInput) (*artifacts.DesignArtifact, error) {
@@ -438,9 +506,12 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 	var ref struct{ Object struct{ SHA string `json:"sha"` } `json:"object"` }
 	_ = json.Unmarshal(mainRef, &ref)
 
-	// 2. Create branch from main
-	createRefPayload := fmt.Sprintf(`{"ref":"refs/heads/%s","sha":"%s"}`, branchName, ref.Object.SHA)
-	_, err = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), createRefPayload)
+	// 2. Create branch from main (PO-4: json.Marshal)
+	createRefPayload, _ := json.Marshal(map[string]string{
+		"ref": fmt.Sprintf("refs/heads/%s", branchName),
+		"sha": ref.Object.SHA,
+	})
+	_, err = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), string(createRefPayload))
 	if err != nil {
 		// Branch might already exist — that's ok
 		fmt.Printf("Branch creation note: %v\n", err)
@@ -458,10 +529,16 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 		return nil, fmt.Errorf("write article file: %w", err)
 	}
 
-	// 4. Create PR
-	prBody := fmt.Sprintf("ATRPE generated article: **%s**\\n\\nReview and merge to publish on Zenn.\\n\\nCloses #%d\\n\\n---\\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)", draft.Title, input.IssueNumber)
-	prPayload := fmt.Sprintf(`{"title":"📝 %s","head":"%s","base":"main","body":"%s"}`, draft.Title, branchName, prBody)
-	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), prPayload)
+	// 4. Create PR (PO-4: json.Marshal prevents injection)
+	// PO-12: Updated message to clarify draft vs publish flow
+	prDesc := fmt.Sprintf("ATRPE draft: **%s**\n\n📖 Review the article. Merge this PR to approve the content.\n\nℹ️ **After merging**, reply `/approve` on #%d to create a publish PR that sets `published: true` on Zenn.\n\nCloses #%d\n\n---\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)", draft.Title, input.IssueNumber, input.IssueNumber)
+	prPayload, _ := json.Marshal(map[string]string{
+		"title": fmt.Sprintf("📝 %s", draft.Title),
+		"head":  branchName,
+		"base":  "main",
+		"body":  prDesc,
+	})
+	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), string(prPayload))
 	if err != nil {
 		return nil, fmt.Errorf("create PR: %w", err)
 	}

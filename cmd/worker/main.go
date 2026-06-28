@@ -73,6 +73,7 @@ func main() {
 	w.RegisterActivity(acts.RunExperiment)
 	w.RegisterActivity(acts.VerifyExperiment)
 	w.RegisterActivity(acts.GenerateDraft)
+	w.RegisterActivity(acts.VerifyArticleClaims)
 	w.RegisterActivity(acts.CreateArticlePR)
 	w.RegisterActivity(acts.PatchExperiment)
 	w.RegisterActivity(acts.UpdateDesign)

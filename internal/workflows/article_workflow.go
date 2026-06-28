@@ -22,6 +22,7 @@ const (
 	StateExperiment          WorkflowState = "EXPERIMENT"
 	StateVerify              WorkflowState = "VERIFY"
 	StateGenerateArticle     WorkflowState = "GENERATE_ARTICLE"
+	StateVerifyArticle       WorkflowState = "VERIFY_ARTICLE"
 	StateWaitPublishApproval WorkflowState = "WAIT_PUBLISH_APPROVAL"
 	StatePublish             WorkflowState = "PUBLISH"
 	StateWaitPublishMerge    WorkflowState = "WAIT_PUBLISH_MERGE"
@@ -113,6 +114,8 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 			s = runVerify(ctx, s)
 		case StateGenerateArticle:
 			s = runGenerateArticle(ctx, s)
+		case StateVerifyArticle:
+			s = runVerifyArticle(ctx, s)
 		case StateWaitPublishApproval:
 			s = runWaitPublishApproval(ctx, s)
 		case StatePublish:
@@ -540,8 +543,46 @@ func runGenerateArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWor
 		return s
 	}
 
-	comment(ctx, s.IssueNumber, fmt.Sprintf("🔀 PR created: %s\n\nReview and merge to publish on Zenn. Reply `/approve` to confirm, or `/changes <notes>` for revisions.", prResult.PRURL))
+	comment(ctx, s.IssueNumber, fmt.Sprintf("🔀 PR created: %s\n\n📖 Review the article there. Then reply `/approve` to trigger final verification.", prResult.PRURL))
 
+	// P8: Verify the generated article's claims before going to approval
+	s.State = StateVerifyArticle
+	setState(ctx, StateVerifyArticle)
+	return s
+}
+
+// P8: runVerifyArticle validates the final generated article's claims
+// against the verified experiment results before PR creation.
+// This catches any hallucinated facts the Writer may have inserted.
+func runVerifyArticle(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "🔬 Verifying article claims against experiment data...")
+
+	var articleReport struct {
+		ClaimsMatched   int    `json:"claims_matched"`
+		ClaimsUnmatched int    `json:"claims_unmatched"`
+		Passed          bool   `json:"passed"`
+	}
+	err := workflow.ExecuteActivity(ctx, "VerifyArticleClaims", map[string]interface{}{
+		"article_body": s.LastDraft.Body,
+		"brief":        s.Brief,
+	}).Get(ctx, &articleReport)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("VerifyArticleClaims failed", "error", err)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ Article claim verification error: %v", err))
+		s.State = StateFailed
+		return s
+	}
+
+	if !articleReport.Passed || articleReport.ClaimsUnmatched > 0 {
+		comment(ctx, s.IssueNumber, fmt.Sprintf(
+			"❌ Article verification FAILED: %d/%d claims matched (need 100%%).\n\nUnsupported claims will cause the article to be blocked. Reply `/changes <notes>` to regenerate.",
+			articleReport.ClaimsMatched, articleReport.ClaimsMatched+articleReport.ClaimsUnmatched))
+		s.State = StateFailed
+		return s
+	}
+
+	comment(ctx, s.IssueNumber, fmt.Sprintf("✅ Article claims verified: %d/%d matched source snapshots", articleReport.ClaimsMatched, articleReport.ClaimsMatched))
 	s.State = StateWaitPublishApproval
 	setState(ctx, StateWaitPublishApproval)
 	return s
@@ -610,7 +651,9 @@ func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSta
 }
 
 func runWaitPublishMerge(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
-	comment(ctx, s.IssueNumber, "⏳ Awaiting publish PR merge... Reply `/merged` when the PR lands.")
+	// PO-2: Primary trigger is the pull_request webhook (real merge).
+	// /merged comment is a fallback for manual recovery.
+	comment(ctx, s.IssueNumber, "⏳ Awaiting publish PR merge...\n\nThe real pull_request webhook will auto-detect the merge.\nReply `/merged` only as a fallback if the webhook fails.")
 	sel := workflow.NewSelector(ctx)
 	sel.AddReceive(workflow.GetSignalChannel(ctx, "PublishMergedSignal"), func(c workflow.ReceiveChannel, more bool) {
 		c.Receive(ctx, &struct{}{})
@@ -629,10 +672,20 @@ func runWaitPublishMerge(ctx workflow.Context, s ArticleWorkflowState) ArticleWo
 func runPublishMerged(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
 	comment(ctx, s.IssueNumber, "📝 Recording published article...")
-	_ = workflow.ExecuteActivity(ctx, "MergePublish", map[string]interface{}{
+
+	// PO-3: Use MergePublishInput struct (not map) and handle errors
+	var mergeResult struct{ Status string `json:"status"` }
+	err := workflow.ExecuteActivity(ctx, "MergePublish", map[string]interface{}{
 		"slug":  s.LastDraft.Slug,
 		"title": s.LastDraft.Title,
-	}).Get(ctx, nil)
+	}).Get(ctx, &mergeResult)
+	if err != nil {
+		workflow.GetLogger(ctx).Error("MergePublish failed", "error", err)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("❌ Failed to record publication: %v", err))
+		s.State = StateFailed
+		return s
+	}
+
 	comment(ctx, s.IssueNumber, fmt.Sprintf("🎉 Published! https://zenn.dev/articles/%s", s.LastDraft.Slug))
 	s.State = StateCompleted
 	setState(ctx, StateCompleted)

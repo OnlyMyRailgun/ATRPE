@@ -13,9 +13,15 @@ import (
 
 // PublishInput holds all data needed for the publish step.
 type PublishInput struct {
-	DraftID   string                `json:"draft_id,omitempty"`
+	DraftID   string                 `json:"draft_id,omitempty"`
 	Draft     artifacts.ArticleDraft `json:"draft,omitempty"`
-	AutoMerge bool                  `json:"auto_merge"`
+	AutoMerge bool                   `json:"auto_merge"`
+}
+
+// MergePublishInput is accepted by MergePublish.
+type MergePublishInput struct {
+	Slug  string `json:"slug"`
+	Title string `json:"title"`
 }
 
 // PublishResult holds the outcome of the publish step.
@@ -27,12 +33,10 @@ type PublishResult struct {
 }
 
 // PublishArticle creates a publish PR that flips published:true.
-// It does NOT record PublishedArticle or complete the workflow —
-// that happens only after the publish PR is actually merged.
-//
-// B: File content is buildZennMarkdown (pure Zenn markdown), not a PR body string.
-// A: Publish PR writes to articles-publish/ directory so CI article-check
-//    (which checks articles/*.md) does not fail on published:true drafts.
+// PO-1: Writes to articles/<slug>.md (same directory as drafts).
+// The publish PR is distinguished by its branch name prefix "atrpe-publish/".
+// PO-3: Does NOT save PublishedArticle or complete workflow on PR creation.
+// PO-4: Uses json.Marshal (never fmt.Sprintf) for all GitHub API payloads.
 func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*PublishResult, error) {
 	var draft artifacts.ArticleDraft
 	if input.Draft.Slug != "" {
@@ -46,7 +50,7 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 		return nil, fmt.Errorf("publish: must provide either draft or draft_id")
 	}
 
-	// B: Flip published:true and build proper Zenn markdown (not PR body wrapper)
+	// Build published:true markdown
 	draft.Published = true
 	markdown := buildZennMarkdown(draft)
 
@@ -59,7 +63,7 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 		return nil, fmt.Errorf("save published markdown: %w", err)
 	}
 
-	// A: Create publish PR — writes to articles-publish/ directory to bypass CI gate
+	// PO-1: Create publish PR in articles/ dir with "atrpe-publish/" branch prefix
 	prURL := ""
 	if a.Config != nil && a.Config.GitHubIssueRepo != "" {
 		prURL = a.createPublishPR(ctx, draft, markdown)
@@ -69,9 +73,8 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 		}
 	}
 
-	// C: Do NOT save PublishedArticle or mark complete here.
-	//    PR merge is the trigger for that — see MergePublishActivity.
-	//    The workflow transitions to WAIT_PUBLISH_MERGE after this returns.
+	// PO-3: Do NOT save PublishedArticle or complete workflow now.
+	// MergePublish is called later by the real pull_request webhook.
 
 	return &PublishResult{
 		Slug:      draft.Slug,
@@ -82,25 +85,26 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 }
 
 // MergePublish records the article as published after the PR actually merged.
-// Called from the webhook/poller when a publish PR merges.
-func (a *Activities) MergePublish(ctx context.Context, slug, title string) error {
+// PO-3: Called by the pull_request webhook handler when a publish PR is merged.
+func (a *Activities) MergePublish(ctx context.Context, input MergePublishInput) error {
 	published := artifacts.PublishedArticle{
-		ID:          slug,
-		Slug:        slug,
-		Title:       title,
+		ID:          input.Slug,
+		Slug:        input.Slug,
+		Title:       input.Title,
 		PublishedAt: time.Now().UTC(),
 		Platform:    "zenn",
-		URL:         fmt.Sprintf("https://zenn.dev/articles/%s", slug),
+		URL:         fmt.Sprintf("https://zenn.dev/articles/%s", input.Slug),
 	}
 	return a.Store.SavePublishedArticle(ctx, published)
 }
 
-// A: createPublishPR writes to articles-publish/ directory so CI skips it.
-// B: `body` is the actual Zenn markdown (from buildZennMarkdown).
+// PO-4: createPublishPR uses json.Marshal for all GitHub API payloads.
+// PO-1: Writes to articles/<slug>.md, branch is "atrpe-publish/<slug>-<ts>".
 func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.ArticleDraft, body string) string {
 	repo := a.Config.GitHubIssueRepo
 	branchName := fmt.Sprintf("atrpe-publish/%s-%s", draft.Slug, time.Now().Format("0102-1504"))
 
+	// Get main HEAD SHA
 	mainRef, err := a.githubGet(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/ref/heads/main", repo))
 	if err != nil {
 		fmt.Printf("publish: get main ref failed: %v\n", err)
@@ -111,25 +115,33 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 		return ""
 	}
 
-	createRefPayload := fmt.Sprintf(`{"ref":"refs/heads/%s","sha":"%s"}`, branchName, ref.Object.SHA)
-	_, _ = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), createRefPayload)
+	// PO-4: json.Marshal based payload (no string concatenation)
+	createRefPayload, _ := json.Marshal(map[string]interface{}{
+		"ref": fmt.Sprintf("refs/heads/%s", branchName),
+		"sha": ref.Object.SHA,
+	})
+	_, _ = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), string(createRefPayload))
 
-	// A: Write to articles-publish/ to avoid CI article-check on articles/*.md
-	filePayload := map[string]string{
+	// PO-1: Write to articles/<slug>.md (same directory as drafts)
+	filePayload, _ := json.Marshal(map[string]string{
 		"message": fmt.Sprintf("ATRPE: publish %s", draft.Title),
 		"content": base64.StdEncoding.EncodeToString([]byte(body)),
 		"branch":  branchName,
-	}
-	fileB, _ := json.Marshal(filePayload)
-	_, err = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/articles-publish/%s.md", repo, draft.Slug), string(fileB))
+	})
+	_, err = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/articles/%s.md", repo, draft.Slug), string(filePayload))
 	if err != nil {
 		fmt.Printf("publish: write file failed: %v\n", err)
 		return ""
 	}
 
-	prBody := fmt.Sprintf("📤 ATRPE publish: **%s**\n\nMerging this PR sets `published: true` on Zenn.\n\n---\n🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)", draft.Title)
-	prPayload := fmt.Sprintf(`{"title":"📤 Publish: %s","head":"%s","base":"main","body":"%s"}`, draft.Title, branchName, prBody)
-	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), prPayload)
+	// PO-4: json.Marshal for PR payload
+	prBody, _ := json.Marshal(map[string]interface{}{
+		"title": fmt.Sprintf("📤 Publish: %s", draft.Title),
+		"head":  branchName,
+		"base":  "main",
+		"body":  fmt.Sprintf("Publish PR for **%s**\n\nMerging this sets `published: true` on Zenn.", draft.Title),
+	})
+	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), string(prBody))
 	if err != nil {
 		fmt.Printf("publish: create PR failed: %v\n", err)
 		return ""
