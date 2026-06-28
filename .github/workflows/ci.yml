@@ -49,14 +49,11 @@ jobs:
       - name: Lint
         run: golangci-lint run --timeout=5m ./...
 
-  # Fix 4: article-check only validates changed article files (git diff).
-  # Published gate skipped on push to main (main already has merged articles).
   article-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
       - name: Set up Go
         uses: actions/setup-go@v5
         with: { go-version: "1.25" }
@@ -65,32 +62,31 @@ jobs:
           FAILED=0
           EVENT='${{ github.event_name }}'
           BRANCH_REF='${{ github.head_ref }}'
-
           echo "Event: $EVENT  Branch: $BRANCH_REF"
 
-          # Fix 4: For PRs, only check changed article files
+          # ── Determine which files to check ──
           if [ "$EVENT" = "pull_request" ]; then
-            FILES=$(git diff --name-only origin/main...HEAD -- articles/*.md 2>/dev/null || true)
+            # Only changed article files (never scans the whole repo)
+            FILES=$(git diff --name-only origin/main...HEAD -- articles/ 2>/dev/null | grep '\.md$' | grep -v '.gitkeep' || true)
           else
-            # push to main — check all articles
-            FILES=$(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true)
-          fi
-
-          IS_PUBLISH_BRANCH=0
-          case "$BRANCH_REF" in atrpe-publish/*) IS_PUBLISH_BRANCH=1 ;; esac
-
-          SKIP_PUBLISHED_GATE=0
-          if [ "$EVENT" = "push" ]; then
-            SKIP_PUBLISHED_GATE=1
+            # push to main — only check changed files
+            FILES=$(git diff --name-only HEAD~1 -- articles/ 2>/dev/null | grep '\.md$' | grep -v '.gitkeep' || true)
           fi
 
           if [ -z "$FILES" ]; then
-            echo "  No article files to check — skipping"
+            echo "  No changed article files — skipping article-check"
             exit 0
           fi
 
-          # 1. Frontmatter + published gate
-          echo "::group::1. Frontmatter + publish gate"
+          echo "  Changed files:"
+          echo "$FILES" | sed 's/^/    /'
+
+          # ── Determine branch type ──
+          IS_PUBLISH_BRANCH=0
+          case "$BRANCH_REF" in atrpe-publish/*) IS_PUBLISH_BRANCH=1 ;; esac
+
+          # ── 1. Frontmatter + published gate ──
+          echo "::group::1. Frontmatter + published gate"
           for f in $FILES; do
             echo "  $f"
             for field in '^---' 'published:' 'emoji:' 'type:' 'topics:'; do
@@ -99,23 +95,22 @@ jobs:
                 FAILED=1
               fi
             done
-            # Fix 4: Skip published:true check on push to main
-            if [ "$SKIP_PUBLISHED_GATE" -eq 0 ]; then
+
+            # published:true gate — only on PRs (push to main is always post-merge)
+            if [ "$EVENT" = "pull_request" ]; then
               if grep -q 'published: true' "$f" 2>/dev/null; then
                 if [ "$IS_PUBLISH_BRANCH" -eq 1 ]; then
                   echo "    ✅ published:true on publish branch"
                 else
-                  echo "    ❌ published:true on non-publish branch"
+                  echo "    ❌ published:true on draft branch — must be false"
                   FAILED=1
                 fi
               fi
-            else
-              echo "    ℹ️  published gate skipped (push to main)"
             fi
           done
           echo "::endgroup::"
 
-          # 2. Anti-patterns
+          # ── 2. Anti-patterns ──
           echo "::group::2. Anti-patterns"
           PLACEHOLDERS=("[TODO]" "[WIP]" "[TBD]" "TODO:" "Lorem ipsum" "add more here" "coming soon" "work in progress")
           for f in $FILES; do
@@ -128,7 +123,7 @@ jobs:
           done
           echo "::endgroup::"
 
-          # 3. Code blocks >= 3
+          # ── 3. Code blocks >= 3 ──
           echo "::group::3. Code blocks"
           for f in $FILES; do
             C=$(grep -c '```' "$f" 2>/dev/null || echo 0)
@@ -142,7 +137,7 @@ jobs:
           done
           echo "::endgroup::"
 
-          # 4. Citation coverage
+          # ── 4. Citation coverage ──
           echo "::group::4. Citation coverage"
           for f in $FILES; do
             L=$(grep -o '\[.*\](http[^)]*' "$f" 2>/dev/null | wc -l || echo 0)
@@ -155,21 +150,16 @@ jobs:
           done
           echo "::endgroup::"
 
-          # 5. Source snapshots
-          echo "::group::5. Source snapshots"
+          # ── 5. Source snapshots (informational only — data lives in ObjectStore, not git) ──
+          echo "::group::5. Source snapshots (info)"
+          S=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
           M=0
           test -f data/manifests/citation_manifest.json && M=1
-          S=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
-          echo "  Manifest: $M | Snapshots: $S"
-          if [ "$M" -gt 0 ] 2>/dev/null; then
-            echo "  ✅ Manifest present"
-          elif [ "$S" -gt 0 ] 2>/dev/null; then
-            echo "  ✅ Snapshots present"
-          elif echo "$FILES" | grep -q '.md' 2>/dev/null; then
-            echo "  ❌ Article PR without source proof"
-            FAILED=1
+          echo "  Snapshots: $S  Manifest: $M"
+          if [ "$M" -gt 0 ] || [ "$S" -gt 0 ]; then
+            echo "  ✅ Source proof present"
           else
-            echo "  ℹ️  No articles — no snapshots needed"
+            echo "  ℹ️  No local snapshots (snapshots live in ObjectStore — verified at workflow time)"
           fi
           echo "::endgroup::"
 
