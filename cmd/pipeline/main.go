@@ -121,7 +121,7 @@ func main() {
 		}
 		log("    %s %s (hash=%s)%s", icon, s.Title, s.ContentHash[:12], snap)
 	}
-	repo.SaveArtifact(ctx, "technical_briefs", brief.ArtifactID.String(), brief.TopicID, brief)
+	_, _ = repo.SaveArtifact(ctx, "technical_briefs", brief.ArtifactID.String(), brief.TopicID, brief)
 
 	// ═══ STEP 4: DESIGN ═══
 	logSection(4, "DESIGN — LLM architecting example")
@@ -132,7 +132,7 @@ func main() {
 		log("    • %s (%s/%s)", c.Name, c.Type, c.Technology)
 	}
 	log("  TestPlan: %s — %d cases", design.TestPlan.Strategy, len(design.TestPlan.TestCases))
-	repo.SaveArtifact(ctx, "design_artifacts", design.ArtifactID.String(), design.TopicID, design)
+	_, _ = repo.SaveArtifact(ctx, "design_artifacts", design.ArtifactID.String(), design.TopicID, design)
 
 	// ═══ STEP 5: EXPERIMENT ═══
 	logSection(5, "EXPERIMENT — code generation + go test/vet")
@@ -159,7 +159,7 @@ func main() {
 		log("    %s %s (%dms)%s", status, c.Name, c.DurationMS, stderr)
 	}
 	log("  Summary: %d✅ %d❌", passCount, failCount)
-	repo.SaveArtifact(ctx, "experiment_results", result.ArtifactID.String(), result.TopicID, result)
+	_, _ = repo.SaveArtifact(ctx, "experiment_results", result.ArtifactID.String(), result.TopicID, result)
 
 	// ═══ STEP 6: VERIFY ═══
 	logSection(6, "VERIFICATION — checking pass/fail")
@@ -175,7 +175,7 @@ func main() {
 	for _, issue := range report.BlockingIssues {
 		log("  🔴 %s", issue)
 	}
-	repo.SaveArtifact(ctx, "verification_reports", report.ArtifactID.String(), report.TopicID, report)
+	_, _ = repo.SaveArtifact(ctx, "verification_reports", report.ArtifactID.String(), report.TopicID, report)
 
 	// ═══ STEP 7: WRITER (with Zenn validation) ═══
 	logSection(7, "WRITER — generating Zenn article")
@@ -199,7 +199,7 @@ func main() {
 	} else {
 		log("  ✅ Zenn validation PASSED")
 	}
-	repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
+	_, _ = repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
 
 	// ── Save article ──
 	outPath := fmt.Sprintf("/tmp/atrpe-article-%s.md", draft.Slug)
