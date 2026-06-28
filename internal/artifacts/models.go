@@ -172,9 +172,13 @@ type TechnicalBrief struct {
 }
 
 type SourceRef struct {
-	URL       string `json:"url"`
-	Title     string `json:"title"`
-	Retrieved string `json:"retrieved"`
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Retrieved   string `json:"retrieved"`
+	ContentHash string `json:"content_hash"` // sha256[:16] of fetched content
+	SnapshotURI string `json:"snapshot_uri"` // ObjectStore key of raw HTML
+	StatusCode  int    `json:"status_code"`  // HTTP status when fetched
+	Fetched     bool   `json:"fetched"`      // true if actually fetched (vs fallback)
 }
 
 // -- Article Draft --

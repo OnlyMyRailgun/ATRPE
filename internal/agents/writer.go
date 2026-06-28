@@ -12,16 +12,51 @@ import (
 	"github.com/your-org/atrpe/internal/artifacts"
 )
 
+// WriterAgent generates Zenn-formatted technical articles.
 type WriterAgent struct {
-	llm *LLMClient
+	llm      *LLMClient
+	language string // "ja" or "en"
 }
 
+// NewWriterAgent creates a writer agent (default: English).
 func NewWriterAgent(llm *LLMClient) *WriterAgent {
-	return &WriterAgent{llm: llm}
+	return &WriterAgent{llm: llm, language: "en"}
 }
 
-const writerSystemPrompt = `You are a Zenn technical article writer. Write a comprehensive technical article in Zenn markdown format.
+// NewWriterAgentWithLanguage creates a writer agent for a specific language.
+func NewWriterAgentWithLanguage(llm *LLMClient, language string) *WriterAgent {
+	return &WriterAgent{llm: llm, language: language}
+}
 
+const writerSystemPromptV2 = `You are a senior technical writer for Zenn (zenn.dev), a Japanese developer platform known for practical, accurate, and deeply engaging technical articles.
+
+## Audience
+Software engineers with 2-5 years of experience who read Japanese and English technical content. They value running code over prose. They will actually type the commands you show.
+
+## Article Structure (use h2 ## for top-level sections)
+1. ## はじめに (Background) — Why this matters NOW. 2-3 sentences.
+2. ## アーキテクチャ (Architecture) — Visual component diagram described in text. Show data flow.
+3. ## 実装 (Implementation) — Step-by-step with REAL code blocks from the experiment results provided. Every code block must come from the experiment's generated files or command outputs.
+4. ## 評価 (Evaluation) — What the tests and benchmarks actually showed. Include command output excerpts.
+5. ## トラブルシューティング (Troubleshooting) — 3+ common problems encountered during development with solutions.
+
+## Zenn Formatting Conventions
+- Use :::message for informational callouts
+- Use :::message alert for warnings and important notes
+- Use <details><summary>詳細を見る</summary>...content...</details> for expandable sections
+- Use ` + "```diff" + ` for code change examples
+- Use emoji in section headers to improve scanability
+- File paths should be in backticks: ` + "`" + `cmd/api/main.go` + "`" + `
+- Command-line instructions should use ` + "```bash" + ` blocks
+
+## Quality Checklist (verify before outputting)
+- [ ] Every code block is from the Provided ExperimentResult, not invented.
+- [ ] All command outputs match the Provided CommandResults.
+- [ ] At least one troubleshooting item matches an actual failed command.
+- [ ] No placeholder text like "[TODO]" or "add more here".
+- [ ] At least 3 code blocks with real syntax.
+
+## Output Format
 Output a JSON object:
 {
   "slug": "my-article-slug",
@@ -31,34 +66,54 @@ Output a JSON object:
   "topics": ["go", "topic"],
   "sections": {
     "background": "Background section in markdown...",
-    "architecture": "Architecture section in markdown...",
+    "architecture": "Architecture section...",
     "implementation": "Implementation section with actual code blocks...",
-    "evaluation": "Evaluation section in markdown...",
-    "troubleshooting": "Troubleshooting section..."
+    "evaluation": "Evaluation section with command outputs...",
+    "troubleshooting": "Troubleshooting section with real error messages..."
   }
 }
 
-IMPORTANT: Output ONLY the JSON object, no other text. Your entire response must be valid parseable JSON.
-Each section must be complete markdown with code blocks, not placeholders.
-Include actual code snippets from the experiment in the implementation section.`
+## Language instruction
+%s
 
+IMPORTANT: Output ONLY the JSON object. Your entire response must be valid parseable JSON.`
+
+func (a *WriterAgent) languageInstruction() string {
+	switch a.language {
+	case "ja":
+		return "Write the article in Japanese (日本語). Use appropriate technical loanwords (外来語) where standard in the Japanese developer community. Section headers should be in Japanese as shown."
+	default:
+		return "Write the article in English."
+	}
+}
+
+// Run generates a Zenn article draft from the full artifact chain.
 func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, result artifacts.ExperimentResult, report artifacts.VerificationReport, changeNotes string) (artifacts.ArticleDraft, error) {
 	input := map[string]any{
-		"brief":  brief,
-		"result": result,
-		"report": report,
+		"topic":            brief.CoreConcepts,
+		"claims":           brief.SupportedClaims,
+		"experiment_files": result.GeneratedFiles,
+		"commands":         result.Commands,
+		"verification": map[string]any{
+			"overall_passed":  report.OverallPassed,
+			"blocking_issues": report.BlockingIssues,
+			"warnings":        report.Warnings,
+		},
+		"sources": brief.Sources,
 	}
 	inputJSON, _ := json.Marshal(input)
 
-	userPrompt := fmt.Sprintf("Write a Zenn article from this research:\n%s", string(inputJSON))
+	userPrompt := fmt.Sprintf("Write a Zenn article from this verified research and experiment data:\n```json\n%s\n```", string(inputJSON))
 	if changeNotes != "" {
 		userPrompt += fmt.Sprintf("\n\nRevision notes: %s", changeNotes)
 	}
+	userPrompt += "\n\nRemember: use only actual code from the experiment. Do not invent code."
 
-	resp, err := a.llm.ChatWithMaxTokens(ctx, []ChatMessage{
-		{Role: "system", Content: todayPrefix() + " " + writerSystemPrompt},
+	sysPrompt := todayPrefix() + " " + fmt.Sprintf(writerSystemPromptV2, a.languageInstruction())
+	resp, err := a.llm.ChatWithTemp(ctx, []ChatMessage{
+		{Role: "system", Content: sysPrompt},
 		{Role: "user", Content: userPrompt},
-	}, 8192)
+	}, a.llm.config.TempFor("writer"), 8192)
 	if err != nil {
 		return artifacts.ArticleDraft{}, fmt.Errorf("writer llm call: %w", err)
 	}
@@ -104,7 +159,7 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 		}, nil
 	}
 
-	body := fmt.Sprintf("# %s\n\n## Background\n%s\n\n## Architecture\n%s\n\n## Implementation\n%s\n\n## Evaluation\n%s\n\n## Troubleshooting\n%s",
+	body := fmt.Sprintf("# %s\n\n## はじめに\n%s\n\n## アーキテクチャ\n%s\n\n## 実装\n%s\n\n## 評価\n%s\n\n## トラブルシューティング\n%s\n\n---\n*🤖 Generated with [ATRPE](https://github.com/OnlyMyRailgun/ATRPE)*\n",
 		parsed.Title,
 		parsed.Sections.Background,
 		parsed.Sections.Architecture,
@@ -112,6 +167,25 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 		parsed.Sections.Evaluation,
 		parsed.Sections.Troubleshooting,
 	)
+
+	valid := NewZennValidator()
+	errs := valid.Validate(artifacts.ArticleDraft{
+		Title:    parsed.Title,
+		Emoji:    parsed.Emoji,
+		Type:     parsed.Type,
+		Topics:   parsed.Topics,
+		Slug:     parsed.Slug,
+		Body:     body,
+		Sections: parsed.Sections,
+	})
+	if len(errs) > 0 {
+		// Log warnings but don't block — human will review
+		var msgs []string
+		for _, e := range errs {
+			msgs = append(msgs, e.Error())
+		}
+		fmt.Printf("⚠️ Zenn validation warnings:\n%s\n", strings.Join(msgs, "\n"))
+	}
 
 	return artifacts.ArticleDraft{
 		BaseArtifact: artifacts.BaseArtifact{
@@ -149,7 +223,7 @@ func slugify(title string) string {
 	for _, r := range strings.ToLower(title) {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' {
 			b.WriteRune(r)
-		} else if r == ' ' || r == '_' {
+		} else if r == ' ' || r == '_' || unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) {
 			b.WriteRune('-')
 		}
 	}

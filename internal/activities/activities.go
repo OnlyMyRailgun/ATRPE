@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,13 +53,18 @@ func New(cfg *config.Settings, store *knowledge.SQLiteStore, objects objectstore
 		}
 	}
 
+	// Wire ResearchAgent with snapshot persistence and citation registry
+	researchAgent := agents.NewResearchAgent(llm)
+	researchAgent.SetSnapshotStore(&objectSnapshotAdapter{objects: objects})
+	researchAgent.SetCitationStore(&knowledgeCitationAdapter{store: store})
+
 	return &Activities{
 		Config:   cfg,
 		Store:    store,
 		Objects:  objects,
 		LLM:      llm,
 		GitHub:   ghClient,
-		Research: agents.NewResearchAgent(llm),
+		Research: researchAgent,
 		Design:   agents.NewDesignAgent(llm),
 	}
 }
@@ -96,7 +102,8 @@ func (a *Activities) ResolveCandidateID(ctx context.Context, input ResolveCandid
 }
 
 func (a *Activities) DiscoverTopics(ctx context.Context) (*DiscoverTopicsResult, error) {
-	candidates, err := topics.DiscoverGitHubTrending(ctx, "https://api.github.com")
+	rssURLs := getEnvSliceDefault("RSS_FEED_URLS", "https://go.dev/blog/feed.atom,https://kubernetes.io/feed.xml")
+	candidates, err := topics.DiscoverAll(ctx, a.Config.TopicSources, rssURLs, "https://api.github.com")
 	if err != nil {
 		return nil, fmt.Errorf("discover: %w", err)
 	}
@@ -112,10 +119,11 @@ func (a *Activities) DiscoverTopics(ctx context.Context) (*DiscoverTopicsResult,
 	return &DiscoverTopicsResult{Candidates: candidates}, nil
 }
 
-// -- Create Topic Selection Issue --
+// -- Create Topic Selection Issue (Decision Sheet) --
 
 type CreateTopicIssueInput struct {
 	Candidates []artifacts.TopicCandidate `json:"candidates"`
+	Audits     []ContentAuditResult       `json:"audits,omitempty"` // optional per-candidate audit data
 }
 
 type CreateTopicIssueResult struct {
@@ -124,18 +132,93 @@ type CreateTopicIssueResult struct {
 }
 
 func (a *Activities) CreateTopicIssue(ctx context.Context, input CreateTopicIssueInput) (*CreateTopicIssueResult, error) {
+	// Build audit lookup
+	auditByID := make(map[string]ContentAuditResult, len(input.Audits))
+	for _, audit := range input.Audits {
+		auditByID[audit.CandidateID] = audit
+	}
+
+	hasAudits := len(input.Audits) > 0
+
 	var sb strings.Builder
-	sb.WriteString("## 🎯 ATRPE Topic Candidates\n\n")
-	sb.WriteString("Select a topic by commenting `/select <candidate_id>`:\n\n")
+	sb.WriteString("## 🎯 ATRPE Topic Decision Sheet\n\n")
+
+	if hasAudits {
+		sb.WriteString("> Each topic has been audited against Zenn, Qiita, HackerNews, and our own article history.\n\n")
+		sb.WriteString("| # | Pass | 📊 Rec | Title | Saturation | Why Now |\n")
+		sb.WriteString("|---|------|--------|-------|------------|--------|\n")
+		for i, c := range input.Candidates {
+			audit, ok := auditByID[c.ID]
+			passIcon := "⏳"
+			recStr := "—"
+			satStr := "—"
+			whyNow := "—"
+			if ok {
+				if audit.Passes {
+					passIcon = "✅"
+				} else {
+					passIcon = "⛔"
+				}
+				recStr = fmt.Sprintf("%.2f", audit.Recommendation)
+				satStr = audit.SaturationLevel
+				whyNow = shorten(audit.WhyNow, 60)
+			}
+			sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s | %s |\n",
+				i+1, passIcon, recStr, c.Title, satStr, whyNow))
+		}
+		sb.WriteString("\n---\n\n")
+	}
 
 	for i, c := range input.Candidates {
-		sb.WriteString(fmt.Sprintf("### %d. %s\n", i+1, c.Title))
+		audit, ok := auditByID[c.ID]
+
+		if ok && !audit.Passes {
+			sb.WriteString(fmt.Sprintf("### %d. ⛔ %s *(SKIPPED)*\n\n", i+1, c.Title))
+		} else if ok {
+			sb.WriteString(fmt.Sprintf("### %d. %s %s\n\n", i+1, audit.EmojiForTopic(), c.Title))
+		} else {
+			sb.WriteString(fmt.Sprintf("### %d. %s\n\n", i+1, c.Title))
+		}
+
 		sb.WriteString(fmt.Sprintf("- **ID**: `%s`\n", c.ID))
-		sb.WriteString(fmt.Sprintf("- **Score**: %.3f\n", c.Score))
+		sb.WriteString(fmt.Sprintf("- **URL**: %s\n", c.URL))
 		sb.WriteString(fmt.Sprintf("- **Source**: %s\n", c.Source))
-		sb.WriteString(fmt.Sprintf("- **URL**: %s\n\n", c.URL))
+
+		if ok {
+			sb.WriteString(fmt.Sprintf("- **推薦指数 (Recommendation)**: %.2f\n", audit.Recommendation))
+			sb.WriteString(fmt.Sprintf("- **飽和度 (Saturation)**: %s (%d existing articles found)\n", audit.SaturationLevel, audit.ExistingCount))
+
+			if audit.OwnOverlap {
+				sb.WriteString("- ⚠️ **注意**: 過去に類似トピックを公開済みです\n")
+			}
+
+			sb.WriteString(fmt.Sprintf("\n#### 🔥 なぜ今書くべきか (Why Now)\n%s\n\n", audit.WhyNow))
+			sb.WriteString(fmt.Sprintf("#### 🕳️ 既存コンテンツのギャップ (Content Gap)\n%s\n\n", audit.ExistingGaps))
+			sb.WriteString(fmt.Sprintf("#### ✨ 差別化ポイント (Differentiation)\n%s\n\n", audit.Differentiation))
+			sb.WriteString(fmt.Sprintf("#### 🧪 コード検証可能な部分 (Testable Part)\n%s\n\n", audit.TestablePart))
+			sb.WriteString(fmt.Sprintf("#### ⚠️ リスク (Risks)\n%s\n\n", audit.Risks))
+
+			if audit.SuggestedTitle != "" {
+				sb.WriteString(fmt.Sprintf("#### 📝 提案タイトル (Suggested Title)\n> %s\n\n", audit.SuggestedTitle))
+			}
+
+			if audit.DontWriteReason != "" {
+				sb.WriteString(fmt.Sprintf("#### ❌ 書かない理由 (Don't Write Because)\n%s\n\n", audit.DontWriteReason))
+			}
+		} else {
+			sb.WriteString(fmt.Sprintf("- **スコア (Score)**: %.3f\n\n", c.Score))
+		}
+
+		sb.WriteString("---\n\n")
 	}
-	sb.WriteString("\n---\n*ATRPE automated topic discovery*")
+
+	sb.WriteString("\n## 📋 How to Select\n\n")
+	sb.WriteString("Comment on this issue to select a topic:\n\n")
+	sb.WriteString("```\n")
+	sb.WriteString("/select <candidate_id>    # Start the article workflow\n")
+	sb.WriteString("/abort                    # Cancel this workflow\n")
+	sb.WriteString("```\n\n")
+	sb.WriteString("*🤖 ATRPE Content Audit powered by real-time platform searches*")
 
 	body := sb.String()
 
@@ -194,7 +277,22 @@ func postCommentViaApp(ctx context.Context, client *github.AppClient, repo strin
 
 // -- Experiment --
 
-func (a *Activities) RunExperiment(ctx context.Context, design artifacts.DesignArtifact) (*artifacts.ExperimentResult, error) {
+type ExperimentInput struct {
+	Design artifacts.DesignArtifact `json:"design"`
+}
+
+type PatchExperimentInput struct {
+	Design artifacts.DesignArtifact  `json:"design"`
+	Result artifacts.ExperimentResult `json:"result"`
+}
+
+type UpdateDesignInput struct {
+	Design artifacts.DesignArtifact `json:"design"`
+	Patch  artifacts.PatchResult    `json:"patch"`
+}
+
+func (a *Activities) RunExperiment(ctx context.Context, input ExperimentInput) (*artifacts.ExperimentResult, error) {
+	design := input.Design
 	agent := agents.NewExperimentAgent(
 		agents.NewLLMCodeGenerator(a.LLM),
 		&agents.DefaultExperimentRunner{},
@@ -222,7 +320,38 @@ func (a *Activities) VerifyExperiment(ctx context.Context, input VerifyInput) (*
 	if err != nil {
 		return nil, err
 	}
+	repo := artifacts.NewRepository(a.Store, a.Objects)
+	repo.SaveArtifact(ctx, "verification_reports", report.ArtifactID.String(), report.TopicID, report)
 	return &report, nil
+}
+
+// -- Patch Experiment --
+
+func (a *Activities) PatchExperiment(ctx context.Context, input PatchExperimentInput) (*artifacts.PatchResult, error) {
+	agent := agents.NewExperimentAgent(
+		agents.NewLLMCodeGenerator(a.LLM),
+		&agents.DefaultExperimentRunner{},
+		"/tmp/atrpe-workspaces",
+	)
+	patch, err := agent.Patch(ctx, input.Design, input.Result)
+	if err != nil {
+		return nil, err
+	}
+	repo := artifacts.NewRepository(a.Store, a.Objects)
+	repo.SaveArtifact(ctx, "patch_results", patch.ArtifactID.String(), patch.TopicID, patch)
+	return &patch, nil
+}
+
+// -- Update Design --
+
+func (a *Activities) UpdateDesign(ctx context.Context, input UpdateDesignInput) (*artifacts.DesignArtifact, error) {
+	updated, err := a.Design.Update(ctx, input.Design, input.Patch)
+	if err != nil {
+		return nil, err
+	}
+	repo := artifacts.NewRepository(a.Store, a.Objects)
+	repo.SaveArtifact(ctx, "design_artifacts", updated.ArtifactID.String(), updated.TopicID, updated)
+	return &updated, nil
 }
 
 // -- Generate Draft --
@@ -235,13 +364,45 @@ type GenerateDraftInput struct {
 }
 
 func (a *Activities) GenerateDraft(ctx context.Context, input GenerateDraftInput) (*artifacts.ArticleDraft, error) {
-	agent := agents.NewWriterAgent(a.LLM)
-	draft, err := agent.Run(ctx, input.Brief, input.Result, input.Report, input.ChangeNotes)
+	// Default article language from config (env: DEFAULT_ARTICLE_LANGUAGE)
+	lang := getEnvDefault("DEFAULT_ARTICLE_LANGUAGE", "ja")
+
+	// Generate primary language draft
+	primaryAgent := agents.NewWriterAgentWithLanguage(a.LLM, lang)
+	draft, err := primaryAgent.Run(ctx, input.Brief, input.Result, input.Report, input.ChangeNotes)
 	if err != nil {
 		return nil, err
 	}
+
+	// Validate the draft against Zenn conventions
+	validator := agents.NewZennValidator()
+	if errs := validator.Validate(draft); len(errs) > 0 {
+		var msgs []string
+		for _, e := range errs {
+			msgs = append(msgs, e.Error())
+		}
+		fmt.Printf("⚠️ Zenn validation warnings for draft %s:\n  %s\n", draft.Slug, strings.Join(msgs, "\n  "))
+	}
+
 	repo := artifacts.NewRepository(a.Store, a.Objects)
 	repo.SaveArtifact(ctx, "article_drafts", draft.ArtifactID.String(), draft.TopicID, draft)
+
+	// Generate secondary language draft if bilingual is enabled
+	if getEnvBool("BILINGUAL_ARTICLES", false) {
+		secondaryLang := "en"
+		if lang == "en" {
+			secondaryLang = "ja"
+		}
+		secondaryAgent := agents.NewWriterAgentWithLanguage(a.LLM, secondaryLang)
+		enDraft, enErr := secondaryAgent.Run(ctx, input.Brief, input.Result, input.Report, input.ChangeNotes)
+		if enErr == nil {
+			repo.SaveArtifact(ctx, "article_drafts", enDraft.ArtifactID.String(), enDraft.TopicID, enDraft)
+			fmt.Printf("✅ Generated %s secondary draft: %s\n", secondaryLang, enDraft.Slug)
+		} else {
+			fmt.Printf("⚠️ Secondary language (%s) generation failed: %v\n", secondaryLang, enErr)
+		}
+	}
+
 	return &draft, nil
 }
 
@@ -463,4 +624,63 @@ func (a *Activities) DesignArchitecture(ctx context.Context, input DesignInput) 
 		return nil, err
 	}
 	return &design, nil
+}
+
+func getEnvDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	return v == "true" || v == "1"
+}
+
+// getEnvSliceDefault reads an env var or falls back to a default, splitting on comma.
+func getEnvSliceDefault(key, fallback string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		v = fallback
+	}
+	parts := strings.Split(v, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+
+// ── Adapters for agent persistence interfaces ──────────────────────────
+
+// objectSnapshotAdapter adapts objectstore.ObjectStore to agents.SnapshotStore.
+type objectSnapshotAdapter struct {
+	objects objectstore.ObjectStore
+}
+
+func (a *objectSnapshotAdapter) Put(ctx context.Context, key string, body io.Reader, contentType string) error {
+	_, err := a.objects.Put(ctx, key, body, contentType)
+	return err
+}
+
+// knowledgeCitationAdapter adapts knowledge.SQLiteStore to agents.CitationStore.
+type knowledgeCitationAdapter struct {
+	store *knowledge.SQLiteStore
+}
+
+func (a *knowledgeCitationAdapter) RegisterCitation(ctx context.Context, url, contentHash, retrievedAt string) error {
+	return a.store.RegisterCitation(ctx, artifacts.CitationRecord{
+		ID:            contentHash[:12],
+		SourceURL:     url,
+		ContentHash:   contentHash,
+		HashAlgorithm: "sha256",
+		RetrievedAt:   retrievedAt,
+	})
 }
