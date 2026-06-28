@@ -311,7 +311,7 @@ func (a *Activities) VerifyPublishMerge(ctx context.Context, input VerifyPublish
 // ── createPublishPR ──
 
 // Returns (prURL, prNumber, headRef, headSHA).
-func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.ArticleDraft, body string, issueNumber int) (string, int, string, string) {
+func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.ArticleDraft, _ string, issueNumber int) (string, int, string, string) {
 	repo := a.Config.GitHubIssueRepo
 	branchName := fmt.Sprintf("atrpe-publish/%s-N%d", draft.Slug, issueNumber)
 
@@ -331,7 +331,7 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 	})
 	_, _ = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), string(createRefPayload))
 
-	// GET existing file SHA from main — MUST exist (draft was merged)
+	// ── Read ACTUAL content from main (preserves human edits) ──
 	filePath := fmt.Sprintf("articles/%s.md", draft.Slug)
 	fileURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s?ref=main", repo, filePath)
 	existingResp, err := a.githubGet(ctx, fileURL)
@@ -346,18 +346,36 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 	if json.Unmarshal(existingResp, &existing) != nil {
 		return "", 0, "", ""
 	}
+	if existing.Content == "" {
+		fmt.Printf("publish: empty content on main\n")
+		return "", 0, "", ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(existing.Content, "\n", ""))
+	if err != nil {
+		fmt.Printf("publish: cannot decode main content: %v\n", err)
+		return "", 0, "", ""
+	}
+	mainContent := string(decoded)
 
-	if existing.Content != "" {
-		decoded, _ := base64.StdEncoding.DecodeString(strings.ReplaceAll(existing.Content, "\n", ""))
-		if strings.Contains(string(decoded), "published: true") || strings.Contains(string(decoded), "published:true") {
-			fmt.Printf("publish: file on main already has published:true — duplicate publish?\n")
-			return "", 0, "", ""
-		}
+	// Guard: already published?
+	if strings.Contains(mainContent, "published: true") || strings.Contains(mainContent, "published:true") {
+		fmt.Printf("publish: file on main already has published:true\n")
+		return "", 0, "", ""
+	}
+
+	// ── PO: Only flip frontmatter. Preserve ALL human-edited body. ──
+	publishContent := strings.Replace(mainContent, "published: false", "published: true", 1)
+	if publishContent == mainContent {
+		publishContent = strings.Replace(mainContent, "published:false", "published:true", 1)
+	}
+	if publishContent == mainContent {
+		fmt.Printf("publish: could not find published:false in main content\n")
+		return "", 0, "", ""
 	}
 
 	filePayload, _ := json.Marshal(map[string]string{
 		"message": fmt.Sprintf("ATRPE: publish %s", draft.Title),
-		"content": base64.StdEncoding.EncodeToString([]byte(body)),
+		"content": base64.StdEncoding.EncodeToString([]byte(publishContent)),
 		"branch":  branchName,
 		"sha":     existing.SHA,
 	})
@@ -371,7 +389,7 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 		"title": fmt.Sprintf("📤 Publish: %s", draft.Title),
 		"head":  branchName,
 		"base":  "main",
-		"body":  fmt.Sprintf("Publish PR for **%s**\n\nMerging this sets `published: true` on Zenn.", draft.Title),
+		"body":  fmt.Sprintf("Publish PR for **%s**\n\nOnly change: `published: false` → `published: true`.\nArticle body preserved from main branch (includes human edits).", draft.Title),
 	})
 	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), string(prPayload))
 	if err != nil {
@@ -393,8 +411,6 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 
 	return prResult.HTMLURL, prResult.Number, prResult.Head.Ref, prResult.Head.SHA
 }
-
-// ── Helpers ──
 
 func buildZennMarkdown(draft artifacts.ArticleDraft) string {
 	publishedStr := "false"
