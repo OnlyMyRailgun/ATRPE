@@ -7,78 +7,91 @@ on:
     branches: [main]
 
 jobs:
-  # ── Hard gate: code compiles ──────────────────────────────
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
+        with: { go-version: "1.25" }
       - name: Build
         run: go build ./...
 
-  # ── Hard gate: all tests pass ─────────────────────────────
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
+        with: { go-version: "1.25" }
       - name: Test
         run: go test -v -race -count=1 ./...
 
-  # ── Hard gate: static analysis ────────────────────────────
   vet:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
+        with: { go-version: "1.25" }
       - name: Vet
         run: go vet ./...
 
-  # ── Hard gate: lint ───────────────────────────────────────
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
+        with: { go-version: "1.25" }
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
       - name: Lint
         run: golangci-lint run --timeout=5m ./...
 
-  # ── Hard gate: article quality ────────────────────────────
+  # Fix 4: article-check only validates changed article files (git diff).
+  # Published gate skipped on push to main (main already has merged articles).
   article-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
+        with: { go-version: "1.25" }
       - name: Article quality check
         run: |
           FAILED=0
+          EVENT='${{ github.event_name }}'
+          BRANCH_REF='${{ github.head_ref }}'
 
-          # P9: Draft PRs (non-publish branches) must have published:false.
-          # Publish PRs (atrpe-publish/* branches) are allowed published:true.
-          echo "::group::1. Frontmatter + publish gate"
+          echo "Event: $EVENT  Branch: $BRANCH_REF"
+
+          # Fix 4: For PRs, only check changed article files
+          if [ "$EVENT" = "pull_request" ]; then
+            FILES=$(git diff --name-only origin/main...HEAD -- articles/*.md 2>/dev/null || true)
+          else
+            # push to main — check all articles
+            FILES=$(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true)
+          fi
 
           IS_PUBLISH_BRANCH=0
-          BRANCH_REF='${{ github.head_ref }}'
           case "$BRANCH_REF" in atrpe-publish/*) IS_PUBLISH_BRANCH=1 ;; esac
 
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+          SKIP_PUBLISHED_GATE=0
+          if [ "$EVENT" = "push" ]; then
+            SKIP_PUBLISHED_GATE=1
+          fi
+
+          if [ -z "$FILES" ]; then
+            echo "  No article files to check — skipping"
+            exit 0
+          fi
+
+          # 1. Frontmatter + published gate
+          echo "::group::1. Frontmatter + publish gate"
+          for f in $FILES; do
             echo "  $f"
             for field in '^---' 'published:' 'emoji:' 'type:' 'topics:'; do
               if ! grep -q "$field" "$f" 2>/dev/null; then
@@ -86,21 +99,26 @@ jobs:
                 FAILED=1
               fi
             done
-            if grep -q 'published: true' "$f" 2>/dev/null; then
-              if [ "$IS_PUBLISH_BRANCH" -eq 1 ]; then
-                echo "    ✅ published:true on publish branch — OK"
-              else
-                echo "    ❌ published:true on draft branch — must be false"
-                FAILED=1
+            # Fix 4: Skip published:true check on push to main
+            if [ "$SKIP_PUBLISHED_GATE" -eq 0 ]; then
+              if grep -q 'published: true' "$f" 2>/dev/null; then
+                if [ "$IS_PUBLISH_BRANCH" -eq 1 ]; then
+                  echo "    ✅ published:true on publish branch"
+                else
+                  echo "    ❌ published:true on non-publish branch"
+                  FAILED=1
+                fi
               fi
+            else
+              echo "    ℹ️  published gate skipped (push to main)"
             fi
           done
           echo "::endgroup::"
 
-          # 2. No placeholder / generated junk
+          # 2. Anti-patterns
           echo "::group::2. Anti-patterns"
           PLACEHOLDERS=("[TODO]" "[WIP]" "[TBD]" "TODO:" "Lorem ipsum" "add more here" "coming soon" "work in progress")
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+          for f in $FILES; do
             for p in "${PLACEHOLDERS[@]}"; do
               if grep -qi "$p" "$f" 2>/dev/null; then
                 echo "  ❌ $f: placeholder '$p'"
@@ -112,52 +130,46 @@ jobs:
 
           # 3. Code blocks >= 3
           echo "::group::3. Code blocks"
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
-            FENCE_COUNT=$(grep -c '```' "$f" 2>/dev/null || echo 0)
-            FENCE_COUNT=$((FENCE_COUNT / 2))
-            if [ "$FENCE_COUNT" -lt 3 ]; then
-              echo "  ❌ $f: $FENCE_COUNT blocks (need >= 3)"
+          for f in $FILES; do
+            C=$(grep -c '```' "$f" 2>/dev/null || echo 0)
+            C=$((C / 2))
+            if [ "$C" -lt 3 ]; then
+              echo "  ❌ $f: $C blocks (need >= 3)"
               FAILED=1
             else
-              echo "  ✅ $f: $FENCE_COUNT code blocks"
+              echo "  ✅ $f: $C code blocks"
             fi
           done
           echo "::endgroup::"
 
-          # 4. Citation coverage — hard fail if < 2 links in article files
+          # 4. Citation coverage
           echo "::group::4. Citation coverage"
-          ARTICLES_EXIST=0
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
-            ARTICLES_EXIST=1
-            LINK_COUNT=$(grep -o '\[.*\](http[^)]*' "$f" 2>/dev/null | wc -l || echo 0)
-            if [ "$LINK_COUNT" -lt 2 ]; then
-              echo "  ❌ $f: $LINK_COUNT links (need >= 2)"
+          for f in $FILES; do
+            L=$(grep -o '\[.*\](http[^)]*' "$f" 2>/dev/null | wc -l || echo 0)
+            if [ "$L" -lt 2 ]; then
+              echo "  ❌ $f: $L links (need >= 2)"
               FAILED=1
             else
-              echo "  ✅ $f: $LINK_COUNT citation links"
+              echo "  ✅ $f: $L citation links"
             fi
           done
           echo "::endgroup::"
 
-          # Blocker 5: Source snapshots — check for snapshot manifest OR raw snapshots
-          # data/artifacts/ is .gitignored. Accept: citation_manifest.json, snapshot_manifest.json,
-          # or actual research_snapshots/ dir if committed.
+          # 5. Source snapshots
           echo "::group::5. Source snapshots"
-          MANIFEST_COUNT=0
-          test -f data/artifacts/citation_manifest.json && MANIFEST_COUNT=1
-          test -f data/artifacts/snapshot_manifest.json && MANIFEST_COUNT=1
-          SNAP_COUNT=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
-          echo "  Manifest files: $MANIFEST_COUNT | Raw snapshots: $SNAP_COUNT"
-          if [ "$MANIFEST_COUNT" -gt 0 ] 2>/dev/null; then
-            echo "  ✅ Citation/snapshot manifest present"
-          elif [ "$SNAP_COUNT" -gt 0 ] 2>/dev/null; then
+          M=0
+          test -f data/manifests/citation_manifest.json && M=1
+          S=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
+          echo "  Manifest: $M | Snapshots: $S"
+          if [ "$M" -gt 0 ] 2>/dev/null; then
+            echo "  ✅ Manifest present"
+          elif [ "$S" -gt 0 ] 2>/dev/null; then
             echo "  ✅ Snapshots present"
-          elif [ "$ARTICLES_EXIST" -eq 1 ]; then
-            echo "  ❌ Articles exist but no source snapshots or manifest found"
-            echo "     Run: go run ./cmd/citation-manifest > data/artifacts/citation_manifest.json"
+          elif echo "$FILES" | grep -q '.md' 2>/dev/null; then
+            echo "  ❌ Article PR without source proof"
             FAILED=1
           else
-            echo "  ℹ️  No snapshots (expected for new repos with no articles)"
+            echo "  ℹ️  No articles — no snapshots needed"
           fi
           echo "::endgroup::"
 
@@ -167,8 +179,3 @@ jobs:
           fi
           echo "✅ Article quality checks PASSED"
           echo "::endgroup::"
-
-# ────────────────────────────────────────────────────────────
-# Branch Protection (manual — set in repo Settings → Branches):
-#   Require: build, test, vet, lint, article-check
-# ────────────────────────────────────────────────────────────

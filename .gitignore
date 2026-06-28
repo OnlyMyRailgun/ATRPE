@@ -1,6 +1,5 @@
 data/knowledge.db
 *.pem
 data/artifacts/
-# Exceptions for CI audit: allow snapshot manifests but exclude raw data
-!data/artifacts/citation_manifest.json
-!data/artifacts/snapshot_manifest.json
+# Fix 5: Manifests stored outside data/artifacts/ so they aren't .gitignored
+# data/manifests/ is committed to CI for article-check verification

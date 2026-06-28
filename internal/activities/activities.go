@@ -387,7 +387,7 @@ func (a *Activities) VerifyArticleClaims(ctx context.Context, input VerifyArticl
 				overlap++
 			}
 		}
-		if overlap >= 2 { // need at least 2 keyword matches to a verified claim
+		if overlap >= 3 { // Fix 8: need at least 3 keyword matches to a verified claim
 			matched++
 		} else {
 			unmatched++
@@ -527,6 +527,22 @@ func (a *Activities) CreateArticlePR(ctx context.Context, input CreateArticlePRI
 	_, err = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/articles/%s.md", repo, draft.Slug), string(fileB))
 	if err != nil {
 		return nil, fmt.Errorf("write article file: %w", err)
+	}
+
+	// Fix 6: Also write citation manifest so CI can verify source snapshots
+	if a.Store != nil {
+		records, _ := a.Store.ListCitationManifest(ctx)
+		if len(records) > 0 {
+			manifestJSON, _ := json.MarshalIndent(records, "", "  ")
+			manifestPayload := map[string]string{
+				"message": fmt.Sprintf("ATRPE: citation manifest for %s", draft.Slug),
+				"content": base64.StdEncoding.EncodeToString([]byte(string(manifestJSON) + "\n")),
+				"branch":  branchName,
+			}
+			manifestB, _ := json.Marshal(manifestPayload)
+			manifestPath := fmt.Sprintf("data/manifests/%s.citation.json", draft.Slug)
+			_, _ = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repo, manifestPath), string(manifestB))
+		}
 	}
 
 	// 4. Create PR (PO-4: json.Marshal prevents injection)

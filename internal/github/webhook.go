@@ -198,20 +198,15 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 	h.logger.Info("publish PR merged — signalling workflow",
 		"branch", branch, "slug", slug, "sha", evt.PullRequest.Head.SHA)
 
-	// Blocker 2: Route signal to article-issue-N via slug→issueNumber mapping.
-	// The publish activity records the mapping; webhook uses it to find the workflow.
+	// Fix 3: Extract issue number directly from branch name (atrpe-publish/<slug>-N<number>)
+	// No SQLite lookup needed — webhook is stateless.
+	issueNumber := extractIssueNumberFromPublishBranch(branch)
+	workflowID := fmt.Sprintf("article-issue-%d", issueNumber)
+	if issueNumber <= 0 {
+		workflowID = "publish-" + slug
+	}
+
 	if h.sender != nil {
-		issueLookup, ok := h.sender.(PublishMappingLookup)
-		workflowID := ""
-		if ok && slug != "" {
-			if n, err := issueLookup.LookupIssueNumber(r.Context(), slug); err == nil && n > 0 {
-				workflowID = fmt.Sprintf("article-issue-%d", n)
-			}
-		}
-		if workflowID == "" {
-			// Fallback: try publish-{slug} (legacy stored workflows)
-			workflowID = "publish-" + slug
-		}
 		if err := h.sender.SendSignal(r.Context(), workflowID, "PublishMergedSignal", map[string]any{
 			"slug":  slug,
 			"title": evt.PullRequest.Title,
@@ -232,14 +227,26 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 	_, _ = w.Write(resp)
 }
 
-// extractSlugFromPublishBranch parses "atrpe-publish/my-article-0615-0930" → "my-article".
+// Fix 3: extractSlugFromPublishBranch parses "atrpe-publish/<slug>-N<number>" → slug.
 func extractSlugFromPublishBranch(branch string) string {
 	branch = strings.TrimPrefix(branch, "atrpe-publish/")
-	// Remove the trailing timestamp: slug-MMDD-HHMM
-	parts := strings.Split(branch, "-")
-	if len(parts) < 3 {
-		return ""
+	// Remove trailing -N<number>
+	idx := strings.LastIndex(branch, "-N")
+	if idx < 0 {
+		return branch // fallback: whole thing is the slug
 	}
-	// Everything except the last two parts (MMDD and HHMM)
-	return strings.Join(parts[:len(parts)-2], "-")
+	return branch[:idx]
+}
+
+// Fix 3: extractIssueNumberFromPublishBranch parses "atrpe-publish/<slug>-N<number>" → number.
+func extractIssueNumberFromPublishBranch(branch string) int {
+	branch = strings.TrimPrefix(branch, "atrpe-publish/")
+	idx := strings.LastIndex(branch, "-N")
+	if idx < 0 {
+		return 0
+	}
+	numStr := branch[idx+2:]
+	var n int
+	_, _ = fmt.Sscanf(numStr, "%d", &n)
+	return n
 }
