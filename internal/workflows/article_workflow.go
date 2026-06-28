@@ -79,6 +79,11 @@ type ArticleWorkflowState struct {
 
 	// Experiment workspace path for cleanup on terminal states.
 	WorkspacePath string
+
+	// Publish PR metadata — stored when publish PR is created, used for merge verification.
+	LastPublishPRNumber int
+	LastPublishHeadRef  string
+	LastPublishHeadSHA  string
 }
 
 func (s *ArticleWorkflowState) Candidates() []topicCandidate {
@@ -622,13 +627,16 @@ func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSta
 	var pubResult struct {
 		Slug      string `json:"slug"`
 		PRURL     string `json:"pr_url"`
+		PRNumber  int    `json:"pr_number"`
+		HeadRef   string `json:"head_ref"`
+		HeadSHA   string `json:"head_sha"`
 		Merged    bool   `json:"merged"`
 		Escalated bool   `json:"escalated"`
 	}
 	err := workflow.ExecuteActivity(ctx, "PublishArticle", map[string]interface{}{
 		"draft":        s.LastDraft,
-"issue_number": s.IssueNumber,
-"auto_merge":   false,
+		"issue_number": s.IssueNumber,
+		"auto_merge":   false,
 	}).Get(ctx, &pubResult)
 	if err != nil {
 		workflow.GetLogger(ctx).Error("PublishArticle failed", "error", err)
@@ -637,6 +645,11 @@ func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSta
 		setState(ctx, StateEscalated)
 		return s
 	}
+
+	// Store PR metadata for merge verification
+	s.LastPublishPRNumber = pubResult.PRNumber
+	s.LastPublishHeadRef = pubResult.HeadRef
+	s.LastPublishHeadSHA = pubResult.HeadSHA
 
 	if pubResult.Escalated {
 		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ PR creation failed: %s\nWorkflow escalated.", pubResult.PRURL))
@@ -647,14 +660,14 @@ func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSta
 		s.State = StatePublishMerged
 		setState(ctx, StatePublishMerged)
 	} else {
-		// C: Publish PR created but not yet merged — wait for merge webhook
-		comment(ctx, s.IssueNumber, fmt.Sprintf("📤 Publish PR created: %s\n⏳ Waiting for merge... Reply `/merged` after merging the PR.", pubResult.PRURL))
+		comment(ctx, s.IssueNumber, fmt.Sprintf(
+			"📤 Publish PR #%d created: %s\n⏳ Waiting for merge...",
+			pubResult.PRNumber, pubResult.PRURL))
 		s.State = StateWaitPublishMerge
 		setState(ctx, StateWaitPublishMerge)
 	}
 	return s
 }
-
 func runWaitPublishMerge(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
 	// PO-2: Primary trigger is the pull_request webhook (real merge).
 	// /merged comment is a fallback for manual recovery.
@@ -681,7 +694,10 @@ func runPublishMerged(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkf
 	// Blocker 3: Verify merge via GitHub API before recording (prevents /merged bypass)
 	var verifyResult struct{ Merged bool `json:"merged"`; PRURL string `json:"pr_url"` }
 	err := workflow.ExecuteActivity(ctx, "VerifyPublishMerge", map[string]interface{}{
-		"slug": s.LastDraft.Slug,
+		"slug":      s.LastDraft.Slug,
+		"pr_number": s.LastPublishPRNumber,
+		"head_ref":  s.LastPublishHeadRef,
+		"head_sha":  s.LastPublishHeadSHA,
 	}).Get(ctx, &verifyResult)
 	if err != nil || !verifyResult.Merged {
 		workflow.GetLogger(ctx).Error("VerifyPublishMerge failed or not merged", "error", err, "merged", verifyResult.Merged)

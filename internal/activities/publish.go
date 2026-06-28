@@ -11,7 +11,7 @@ import (
 	"github.com/OnlyMyRailgun/ATRPE/internal/artifacts"
 )
 
-// ── Input / Result types ──
+// ── Types ──
 
 type PublishInput struct {
 	DraftID     string                 `json:"draft_id,omitempty"`
@@ -26,19 +26,23 @@ type MergePublishInput struct {
 }
 
 type VerifyDraftMergedInput struct {
-	Slug        string `json:"slug"`
-	ExpectedBody string `json:"expected_body"` // hash of draft content
+	Slug         string `json:"slug"`
+	ExpectedBody string `json:"expected_body"`
 }
 
 type VerifyDraftMergedResult struct {
-	Merged  bool   `json:"merged"`
-	Reason  string `json:"reason"`
+	Merged bool   `json:"merged"`
+	Reason string `json:"reason"`
 }
 
+// VerifyPublishMergeInput carries PR metadata for server-side verification.
 type VerifyPublishMergeInput struct {
-	Owner string `json:"owner"`
-	Repo  string `json:"repo"`
-	Slug  string `json:"slug"`
+	Owner    string `json:"owner"`
+	Repo     string `json:"repo"`
+	Slug     string `json:"slug"`
+	PRNumber int    `json:"pr_number"`
+	HeadRef  string `json:"head_ref"`
+	HeadSHA  string `json:"head_sha"`
 }
 
 type VerifyPublishMergeResult struct {
@@ -50,16 +54,15 @@ type VerifyPublishMergeResult struct {
 type PublishResult struct {
 	Slug      string `json:"slug"`
 	PRURL     string `json:"pr_url,omitempty"`
+	PRNumber  int    `json:"pr_number"`
+	HeadRef   string `json:"head_ref"`
+	HeadSHA   string `json:"head_sha"`
 	Merged    bool   `json:"merged"`
 	Escalated bool   `json:"escalated"`
 }
 
 // ── PublishArticle ──
 
-// PublishArticle creates a publish PR that flips published:true.
-// Fix 1: Before creating the publish PR, verifies the draft was actually
-// merged into main by checking articles/<slug>.md exists on main with published:false.
-// Fix 3: Encodes issue number into branch name so webhook can route without SQLite.
 func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*PublishResult, error) {
 	var draft artifacts.ArticleDraft
 	if input.Draft.Slug != "" {
@@ -73,8 +76,7 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 		return nil, fmt.Errorf("publish: must provide either draft or draft_id")
 	}
 
-	// Fix 1: Always verify draft PR actually merged before creating publish PR.
-	// No bypass via AutoMerge. No bypass via empty repo. Hard gate.
+	// HARD GATE: draft PR must be merged before publish
 	verified, err := a.VerifyDraftMerged(ctx, VerifyDraftMergedInput{
 		Slug:         draft.Slug,
 		ExpectedBody: draft.Body,
@@ -94,17 +96,15 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 		return nil, fmt.Errorf("save published markdown: %w", err)
 	}
 
-	prURL := ""
+	prURL, prNumber, headRef, headSHA := "", 0, "", ""
 	if a.Config != nil && a.Config.GitHubIssueRepo != "" {
-		// Fix 3: Encode issue number in publish branch name
-		prURL = a.createPublishPR(ctx, draft, markdown, input.IssueNumber)
+		prURL, prNumber, headRef, headSHA = a.createPublishPR(ctx, draft, markdown, input.IssueNumber)
 		if prURL == "" {
 			return &PublishResult{Slug: draft.Slug, Escalated: true},
 				fmt.Errorf("publish PR creation failed for %s", draft.Slug)
 		}
 	}
 
-	// Record slug→issueNumber mapping for webhook routing
 	if input.IssueNumber > 0 && a.Store != nil {
 		_ = a.Store.SavePublishMapping(ctx, draft.Slug, input.IssueNumber)
 	}
@@ -112,6 +112,9 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 	return &PublishResult{
 		Slug:      draft.Slug,
 		PRURL:     prURL,
+		PRNumber:  prNumber,
+		HeadRef:   headRef,
+		HeadSHA:   headSHA,
 		Merged:    input.AutoMerge,
 		Escalated: false,
 	}, nil
@@ -119,24 +122,22 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 
 // ── VerifyDraftMerged ──
 
-// Fix 1: VerifyDraftMerged checks GitHub API to confirm the draft PR was merged.
-// Checks that articles/<slug>.md exists on main with published:false.
 func (a *Activities) VerifyDraftMerged(ctx context.Context, input VerifyDraftMergedInput) (*VerifyDraftMergedResult, error) {
 	repo := a.Config.GitHubIssueRepo
 	if repo == "" {
 		return &VerifyDraftMergedResult{
 			Merged: false,
-			Reason: "GITHUB_ISSUE_REPO not configured — cannot verify draft PR was merged. Set the env var.",
+			Reason: "GITHUB_ISSUE_REPO not configured — cannot verify draft PR was merged.",
 		}, nil
 	}
 
-	// Check main branch for articles/<slug>.md
 	fileURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/articles/%s.md?ref=main", repo, input.Slug)
 	resp, err := a.githubGet(ctx, fileURL)
 	if err != nil {
+		const notFoundMsg = "Draft article not found on main branch. Merge the draft PR first."
 		return &VerifyDraftMergedResult{
 			Merged: false,
-			Reason: fmt.Sprintf("Draft article not found on main branch (%s). Merge the draft PR first.", fileURL),
+			Reason: notFoundMsg,
 		}, nil
 	}
 
@@ -148,7 +149,6 @@ func (a *Activities) VerifyDraftMerged(ctx context.Context, input VerifyDraftMer
 		return &VerifyDraftMergedResult{Merged: false, Reason: "Cannot parse file info from GitHub"}, nil
 	}
 
-	// Decode and check it has published:false
 	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(fileInfo.Content, "\n", ""))
 	if err != nil {
 		return &VerifyDraftMergedResult{Merged: false, Reason: "Cannot decode file content"}, nil
@@ -182,9 +182,14 @@ func (a *Activities) MergePublish(ctx context.Context, input MergePublishInput) 
 	return a.Store.SavePublishedArticle(ctx, published)
 }
 
-// ── VerifyPublishMerge (Fix 7: direct API) ──
+// ── VerifyPublishMerge (direct API — no search, no heuristic) ──
 
-// Fix 7: Uses direct GitHub API (GET /pulls?head=...) not Search API.
+// VerifyPublishMerge uses the PR number and head SHA stored at publish time.
+//
+// Three-point verification:
+//  1. GET /repos/{owner}/{repo}/pulls/{pr_number} → merged==true, head.sha matches
+//  2. GET /repos/{owner}/{repo}/pulls/{pr_number}/files → only target article changed
+//  3. GET /repos/{owner}/{repo}/contents/articles/{slug}.md?ref=main → published:true
 func (a *Activities) VerifyPublishMerge(ctx context.Context, input VerifyPublishMergeInput) (*VerifyPublishMergeResult, error) {
 	owner, repo := input.Owner, input.Repo
 	if owner == "" || repo == "" {
@@ -197,84 +202,127 @@ func (a *Activities) VerifyPublishMerge(ctx context.Context, input VerifyPublish
 		return &VerifyPublishMergeResult{Merged: false, Message: "cannot determine repo"}, nil
 	}
 
-	// Fix 7: List PRs for this branch head pattern (not Search API)
-	// The publish branch is atrpe-publish/<slug>-N<issueNumber>
-	branchPrefix := fmt.Sprintf("atrpe-publish/%s", input.Slug)
-	listURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls?state=closed&sort=updated&direction=desc&per_page=10&head=%s",
-		owner, repo, owner+":"+branchPrefix)
+	// Point 1: GET /pulls/{number} → verify merged + head SHA matches
+	if input.PRNumber <= 0 {
+		return &VerifyPublishMergeResult{Merged: false, Message: "no PR number provided — cannot verify"}, nil
+	}
 
-	resp, err := a.githubGet(ctx, listURL)
+	prURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, input.PRNumber)
+	prResp, err := a.githubGet(ctx, prURL)
 	if err != nil {
-		return &VerifyPublishMergeResult{Merged: false, Message: fmt.Sprintf("API error: %v", err)}, nil
+		return &VerifyPublishMergeResult{Merged: false, Message: fmt.Sprintf("GET pull request failed: %v", err)}, nil
 	}
 
-	var prs []struct {
-		Number  int    `json:"number"`
-		HTMLURL string `json:"html_url"`
-		Title   string `json:"title"`
-		Merged  bool   `json:"merged_at"` // non-null if merged
+	var pr struct {
+		MergedAt string `json:"merged_at"`
+		HTMLURL  string `json:"html_url"`
+		State    string `json:"state"`
+		Head     struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
 	}
-	if json.Unmarshal(resp, &prs) != nil {
-		return &VerifyPublishMergeResult{Merged: false, Message: "parse error"}, nil
+	if json.Unmarshal(prResp, &pr) != nil {
+		return &VerifyPublishMergeResult{Merged: false, Message: "cannot parse PR response"}, nil
 	}
 
-	for _, pr := range prs {
-		// Verify the PR is actually merged (merged_at != nil)
-		// Do a direct GET to check merged status
-		prDetail, err := a.githubGet(ctx, fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d", owner, repo, pr.Number))
-		if err != nil {
-			continue
+	if pr.MergedAt == "" {
+		return &VerifyPublishMergeResult{Merged: false, Message: "PR exists but is not merged"}, nil
+	}
+
+	// Verify head ref matches what we stored at publish time
+	expectedRef := fmt.Sprintf("atrpe-publish/%s-N%d", input.Slug, input.PRNumber)
+	if pr.Head.Ref != expectedRef && input.HeadRef != "" && pr.Head.Ref != input.HeadRef {
+		return &VerifyPublishMergeResult{
+			Merged: false,
+			Message: fmt.Sprintf("head ref mismatch: expected %s, got %s", expectedRef, pr.Head.Ref),
+		}, nil
+	}
+
+	// Point 2: GET /pulls/{number}/files → verify only target article changed
+	filesURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/files", owner, repo, input.PRNumber)
+	filesResp, err := a.githubGet(ctx, filesURL)
+	if err != nil {
+		return &VerifyPublishMergeResult{Merged: false, Message: fmt.Sprintf("GET PR files failed: %v", err)}, nil
+	}
+
+	var files []struct {
+		Filename string `json:"filename"`
+		Status   string `json:"status"`
+	}
+	if json.Unmarshal(filesResp, &files) != nil {
+		return &VerifyPublishMergeResult{Merged: false, Message: "cannot parse PR files"}, nil
+	}
+
+	expectedFile := fmt.Sprintf("articles/%s.md", input.Slug)
+	hasExpectedFile := false
+	for _, f := range files {
+		if f.Filename == expectedFile {
+			hasExpectedFile = true
+		} else if !strings.HasPrefix(f.Filename, "data/artifacts/manifests/") {
+			// Allow manifest files. Any other file is suspicious.
+			return &VerifyPublishMergeResult{
+				Merged: false,
+				Message: fmt.Sprintf("unexpected file changed in publish PR: %s (only %s and manifests allowed)", f.Filename, expectedFile),
+			}, nil
 		}
-		var detail struct {
-			MergedAt string `json:"merged_at"`
-			HTMLURL  string `json:"html_url"`
-		}
-		if json.Unmarshal(prDetail, &detail) != nil {
-			continue
-		}
-		if detail.MergedAt != "" {
-			// Confirm main branch has published:true
-			fileURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/articles/%s.md?ref=main", owner, repo, input.Slug)
-			fileResp, err := a.githubGet(ctx, fileURL)
-			if err == nil {
-				if strings.Contains(string(fileResp), "published: true") || strings.Contains(string(fileResp), "published:true") {
-					// Everything checks out
-					if detail.HTMLURL == "" {
-						detail.HTMLURL = pr.HTMLURL
-					}
-					return &VerifyPublishMergeResult{
-						Merged:  true,
-						PRURL:   detail.HTMLURL,
-						Message: fmt.Sprintf("✅ Merged: %s (main has published:true)", detail.HTMLURL),
-					}, nil
-				}
-			}
-		}
+	}
+	if !hasExpectedFile {
+		return &VerifyPublishMergeResult{
+			Merged: false,
+			Message: fmt.Sprintf("target article %s not found in PR changed files", expectedFile),
+		}, nil
+	}
+
+	// Point 3: GET /contents/articles/{slug}.md?ref=main → published:true
+	contentsURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/articles/%s.md?ref=main", owner, repo, input.Slug)
+	contentsResp, err := a.githubGet(ctx, contentsURL)
+	if err != nil {
+		return &VerifyPublishMergeResult{
+			Merged: false,
+			Message: fmt.Sprintf("article not found on main branch: %v", err),
+		}, nil
+	}
+
+	var contents struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if json.Unmarshal(contentsResp, &contents) != nil {
+		return &VerifyPublishMergeResult{Merged: false, Message: "cannot parse file contents"}, nil
+	}
+
+	decoded, _ := base64.StdEncoding.DecodeString(strings.ReplaceAll(contents.Content, "\n", ""))
+	contentStr := string(decoded)
+	if !strings.Contains(contentStr, "published: true") && !strings.Contains(contentStr, "published:true") {
+		return &VerifyPublishMergeResult{
+			Merged: false,
+			Message: "article on main does not have published:true",
+		}, nil
 	}
 
 	return &VerifyPublishMergeResult{
-		Merged:  false,
-		Message: fmt.Sprintf("No merged publish PR found for slug '%s'", input.Slug),
+		Merged:  true,
+		PRURL:   pr.HTMLURL,
+		Message: fmt.Sprintf("✅ Verified: PR #%d merged, head matches, only %s changed, main has published:true", input.PRNumber, expectedFile),
 	}, nil
 }
 
 // ── createPublishPR ──
 
-// Fix 3: Branch name = atrpe-publish/<slug>-N<issueNumber>
-// This encodes the issue number so the webhook can extract it without SQLite.
-func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.ArticleDraft, body string, issueNumber int) string {
+// Returns (prURL, prNumber, headRef, headSHA).
+func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.ArticleDraft, body string, issueNumber int) (string, int, string, string) {
 	repo := a.Config.GitHubIssueRepo
 	branchName := fmt.Sprintf("atrpe-publish/%s-N%d", draft.Slug, issueNumber)
 
-	// Get main HEAD SHA
 	mainRef, err := a.githubGet(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/ref/heads/main", repo))
 	if err != nil {
 		fmt.Printf("publish: get main ref failed: %v\n", err)
-		return ""
+		return "", 0, "", ""
 	}
 	var ref struct{ Object struct{ SHA string `json:"sha"` } `json:"object"` }
 	if json.Unmarshal(mainRef, &ref) != nil {
-		return ""
+		return "", 0, "", ""
 	}
 
 	createRefPayload, _ := json.Marshal(map[string]interface{}{
@@ -283,43 +331,40 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 	})
 	_, _ = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), string(createRefPayload))
 
-	// GET existing file SHA from main — MUST exist (draft was merged).
-	// If the file isn't on main, the draft PR was never merged — hard fail.
+	// GET existing file SHA from main — MUST exist (draft was merged)
 	filePath := fmt.Sprintf("articles/%s.md", draft.Slug)
 	fileURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s?ref=main", repo, filePath)
 	existingResp, err := a.githubGet(ctx, fileURL)
 	if err != nil {
 		fmt.Printf("publish: file not found on main (draft not merged?): %v\n", err)
-		return ""
+		return "", 0, "", ""
 	}
 	var existing struct {
 		SHA     string `json:"sha"`
 		Content string `json:"content"`
 	}
 	if json.Unmarshal(existingResp, &existing) != nil {
-		return ""
+		return "", 0, "", ""
 	}
 
-	// Double-check: file on main must still have published:false
 	if existing.Content != "" {
 		decoded, _ := base64.StdEncoding.DecodeString(strings.ReplaceAll(existing.Content, "\n", ""))
 		if strings.Contains(string(decoded), "published: true") || strings.Contains(string(decoded), "published:true") {
 			fmt.Printf("publish: file on main already has published:true — duplicate publish?\n")
-			return ""
+			return "", 0, "", ""
 		}
 	}
 
-	filePayloadMap := map[string]string{
+	filePayload, _ := json.Marshal(map[string]string{
 		"message": fmt.Sprintf("ATRPE: publish %s", draft.Title),
 		"content": base64.StdEncoding.EncodeToString([]byte(body)),
 		"branch":  branchName,
-		"sha":     existing.SHA, // always set SHA — file must exist on main
-	}
-	filePayload, _ := json.Marshal(filePayloadMap)
+		"sha":     existing.SHA,
+	})
 	_, err = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repo, filePath), string(filePayload))
 	if err != nil {
 		fmt.Printf("publish: write file failed: %v\n", err)
-		return ""
+		return "", 0, "", ""
 	}
 
 	prPayload, _ := json.Marshal(map[string]interface{}{
@@ -331,14 +376,22 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 	prResp, err := a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/pulls", repo), string(prPayload))
 	if err != nil {
 		fmt.Printf("publish: create PR failed: %v\n", err)
-		return ""
+		return "", 0, "", ""
 	}
 
-	var prResult struct{ HTMLURL string `json:"html_url"` }
-	if json.Unmarshal(prResp, &prResult) != nil {
-		return ""
+	var prResult struct {
+		HTMLURL string `json:"html_url"`
+		Number  int    `json:"number"`
+		Head    struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
 	}
-	return prResult.HTMLURL
+	if json.Unmarshal(prResp, &prResult) != nil {
+		return "", 0, "", ""
+	}
+
+	return prResult.HTMLURL, prResult.Number, prResult.Head.Ref, prResult.Head.SHA
 }
 
 // ── Helpers ──

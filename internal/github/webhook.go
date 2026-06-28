@@ -70,6 +70,7 @@ type githubCommentEvent struct {
 // PO-2: pull_request event structure for merge detection.
 type githubPullRequestEvent struct {
 	Action      string `json:"action"` // "closed" for merge
+	Number      int    `json:"number"`
 	PullRequest struct {
 		Merged bool   `json:"merged"`
 		Title  string `json:"title"`
@@ -208,8 +209,9 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 
 	if h.sender != nil {
 		if err := h.sender.SendSignal(r.Context(), workflowID, "PublishMergedSignal", map[string]any{
-			"slug":  slug,
-			"title": evt.PullRequest.Title,
+			"slug":      slug,
+			"pr_number": evt.Number,
+			"head_sha":  evt.PullRequest.Head.SHA,
 		}); err != nil {
 			h.logger.Error("send publish merge signal", "error", err, "workflowID", workflowID)
 			http.Error(w, "signal error", http.StatusInternalServerError)
