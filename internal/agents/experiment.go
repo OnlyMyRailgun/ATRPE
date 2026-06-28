@@ -122,6 +122,10 @@ func (a *ExperimentAgent) Run(ctx context.Context, design artifacts.DesignArtifa
 
 	var filePaths []string
 	for _, f := range mod.Files {
+		// E: Reject absolute paths and traversal
+		if !pathSafe(f.Path) {
+			return artifacts.ExperimentResult{}, fmt.Errorf("unsafe path: %s", f.Path)
+		}
 		fullPath := filepath.Join(workdir, f.Path)
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 			return artifacts.ExperimentResult{}, fmt.Errorf("mkdir for %s: %w", f.Path, err)
@@ -220,6 +224,18 @@ func (a *ExperimentAgent) Patch(ctx context.Context, design artifacts.DesignArti
 		FailedCommands:     failedCmds,
 		RemediationReason:  fmt.Sprintf("%d commands failed", len(failedCmds)),
 	}, nil
+}
+
+// E: pathSafe rejects absolute paths and traversal attempts.
+func pathSafe(p string) bool {
+	if filepath.IsAbs(p) {
+		return false
+	}
+	cleaned := filepath.Clean(p)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 func hashBytes(b []byte) string {

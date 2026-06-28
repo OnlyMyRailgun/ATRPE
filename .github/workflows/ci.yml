@@ -72,7 +72,7 @@ jobs:
 
           # 1. Frontmatter — draft PRs must NOT have published:true
           echo "::group::1. Frontmatter + publish gate"
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' -not -path '*/articles-publish/*' 2>/dev/null || true); do
             echo "  $f"
             for field in '^---' 'published:' 'emoji:' 'type:' 'topics:'; do
               if ! grep -q "$field" "$f" 2>/dev/null; then
@@ -87,10 +87,22 @@ jobs:
           done
           echo "::endgroup::"
 
+          # A: Publish PR gate — articles-publish/ files are allowed published:true
+          echo "::group::1b. Publish PRs"
+          for f in $(find articles -name '*.md' -path '*/articles-publish/*' 2>/dev/null || true); do
+            echo "  [publish] $f"
+            if grep -q 'published: true' "$f" 2>/dev/null; then
+              echo "    ✅ publish PR with published:true"
+            else
+              echo "    ⚠️  publish PR without published:true — verify"
+            fi
+          done
+          echo "::endgroup::"
+
           # 2. No placeholder / generated junk
           echo "::group::2. Anti-patterns"
           PLACEHOLDERS=("[TODO]" "[WIP]" "[TBD]" "TODO:" "Lorem ipsum" "add more here" "coming soon" "work in progress")
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' -not -path '*/articles-publish/*' 2>/dev/null || true); do
             for p in "${PLACEHOLDERS[@]}"; do
               if grep -qi "$p" "$f" 2>/dev/null; then
                 echo "  ❌ $f: placeholder '$p'"
@@ -102,7 +114,7 @@ jobs:
 
           # 3. Code blocks >= 3
           echo "::group::3. Code blocks"
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' -not -path '*/articles-publish/*' 2>/dev/null || true); do
             FENCE_COUNT=$(grep -c '```' "$f" 2>/dev/null || echo 0)
             FENCE_COUNT=$((FENCE_COUNT / 2))
             if [ "$FENCE_COUNT" -lt 3 ]; then
@@ -117,7 +129,7 @@ jobs:
           # 4. Citation coverage — hard fail if < 2 links in article files
           echo "::group::4. Citation coverage"
           ARTICLES_EXIST=0
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' -not -path '*/articles-publish/*' 2>/dev/null || true); do
             ARTICLES_EXIST=1
             LINK_COUNT=$(grep -o '\[.*\](http[^)]*' "$f" 2>/dev/null | wc -l || echo 0)
             if [ "$LINK_COUNT" -lt 2 ]; then

@@ -78,6 +78,7 @@ func main() {
 	w.RegisterActivity(acts.UpdateDesign)
 	w.RegisterActivity(acts.CleanupWorkspace)
 	w.RegisterActivity(acts.CollectEngagementMetrics)
+	w.RegisterActivity(acts.MergePublish)
 	w.RegisterActivity(acts.PublishArticle)
 
 	// Start issue poller if GitHub App is configured

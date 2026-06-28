@@ -10,43 +10,22 @@ import (
 
 func setupEnv(env *testsuite.TestWorkflowEnvironment) {
 	env.RegisterWorkflow(ArticleWorkflow)
-
-	// Mock DiscoverTopics
 	env.RegisterActivity(func() (map[string]interface{}, error) {
-		return map[string]interface{}{"candidates": []interface{}{
-			map[string]interface{}{"id": "abc123", "title": "test-repo", "score": 0.95, "source": "github_trending", "url": "https://example.com"},
-		}}, nil
+		return map[string]interface{}{"candidates": []interface{}{}}, nil
 	})
-
-	// Mock AuditTopics
 	env.RegisterActivity(func(input map[string]interface{}) (map[string]interface{}, error) {
-		return map[string]interface{}{"audits": []interface{}{
-			map[string]interface{}{"candidate_id": "abc123", "passes": true, "recommendation": 0.85, "saturation_level": "low"},
-		}}, nil
+		return map[string]interface{}{"audits": []interface{}{}}, nil
 	})
-
-	// Mock CreateTopicIssue
 	env.RegisterActivity(func(input map[string]interface{}) (map[string]interface{}, error) {
 		return map[string]interface{}{"issue_url": "test://issue", "issue_number": 1}, nil
 	})
-
-	// Mock ResolveCandidateID
 	env.RegisterActivity(func(input map[string]interface{}) (map[string]interface{}, error) {
 		return map[string]interface{}{"candidate_id": "abc123"}, nil
 	})
-
-	// Mock ResearchTopic
-	env.RegisterActivity(func(input map[string]interface{}) (interface{}, error) {
-		return nil, nil
-	})
-
-	// Mock PostComment (no-op)
-	env.RegisterActivity(func(input map[string]interface{}) error {
-		return nil
-	})
-
-	// Mock all downstream activities
+	// Research, Design, Experiment, Verify, GenerateDraft, PublishArticle,
+	// MergePublish, PostComment — all no-ops
 	env.RegisterActivity(func(input map[string]interface{}) (interface{}, error) { return nil, nil })
+	env.RegisterActivity(func(input map[string]interface{}) error { return nil })
 }
 
 func TestArticleWorkflow_HappyPath(t *testing.T) {
@@ -54,7 +33,6 @@ func TestArticleWorkflow_HappyPath(t *testing.T) {
 	env := suite.NewTestWorkflowEnvironment()
 	setupEnv(env)
 
-	// After CONTENT_AUDIT completes, select topic and approve
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow("TopicSelectedSignal", TopicSelectedSignal{CandidateID: "abc123"})
 	}, time.Millisecond*200)
@@ -62,6 +40,11 @@ func TestArticleWorkflow_HappyPath(t *testing.T) {
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow("PublishApprovalSignal", PublishApprovalSignal{})
 	}, time.Millisecond*800)
+
+	// C: publish PR created → wait for merge → merged signal
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow("PublishMergedSignal", struct{}{})
+	}, time.Millisecond*1200)
 
 	env.ExecuteWorkflow(ArticleWorkflow, ArticleWorkflowInput{MaxRemediationAttempts: 3})
 
@@ -100,6 +83,10 @@ func TestArticleWorkflow_ChangesDuringApproval(t *testing.T) {
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow("PublishApprovalSignal", PublishApprovalSignal{})
 	}, time.Millisecond*800)
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow("PublishMergedSignal", struct{}{})
+	}, time.Millisecond*1200)
 
 	env.ExecuteWorkflow(ArticleWorkflow, ArticleWorkflowInput{MaxRemediationAttempts: 3})
 

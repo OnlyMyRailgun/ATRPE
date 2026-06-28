@@ -24,6 +24,8 @@ const (
 	StateGenerateArticle     WorkflowState = "GENERATE_ARTICLE"
 	StateWaitPublishApproval WorkflowState = "WAIT_PUBLISH_APPROVAL"
 	StatePublish             WorkflowState = "PUBLISH"
+	StateWaitPublishMerge    WorkflowState = "WAIT_PUBLISH_MERGE"
+	StatePublishMerged       WorkflowState = "PUBLISH_MERGED"
 	StatePatchGeneration     WorkflowState = "PATCH_GENERATION"
 	StateDesignUpdate        WorkflowState = "DESIGN_UPDATE"
 	StateEscalated           WorkflowState = "ESCALATED"
@@ -115,6 +117,10 @@ func ArticleWorkflow(ctx workflow.Context, input ArticleWorkflowInput) error {
 			s = runWaitPublishApproval(ctx, s)
 		case StatePublish:
 			s = runPublish(ctx, s)
+		case StateWaitPublishMerge:
+			s = runWaitPublishMerge(ctx, s)
+		case StatePublishMerged:
+			s = runPublishMerged(ctx, s)
 		case StatePatchGeneration:
 			s = runPatchGeneration(ctx, s)
 		case StateDesignUpdate:
@@ -587,18 +593,49 @@ func runPublish(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowSta
 	}
 
 	if pubResult.Escalated {
-		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ PR created but not merged: %s\nManual merge required. Reply `/retry` after merging.", pubResult.PRURL))
+		comment(ctx, s.IssueNumber, fmt.Sprintf("⚠️ PR creation failed: %s\nWorkflow escalated.", pubResult.PRURL))
 		s.State = StateEscalated
 		setState(ctx, StateEscalated)
 	} else if pubResult.Merged {
-		comment(ctx, s.IssueNumber, fmt.Sprintf("🎉 Published! https://zenn.dev/articles/%s", pubResult.Slug))
-		s.State = StateCompleted
-		setState(ctx, StateCompleted)
+		comment(ctx, s.IssueNumber, fmt.Sprintf("🎉 Published (auto-merge)! https://zenn.dev/articles/%s", pubResult.Slug))
+		s.State = StatePublishMerged
+		setState(ctx, StatePublishMerged)
 	} else {
-		comment(ctx, s.IssueNumber, fmt.Sprintf("📤 PR submitted: %s\nAwaiting merge.", pubResult.PRURL))
-		s.State = StateCompleted
-		setState(ctx, StateCompleted)
+		// C: Publish PR created but not yet merged — wait for merge webhook
+		comment(ctx, s.IssueNumber, fmt.Sprintf("📤 Publish PR created: %s\n⏳ Waiting for merge... Reply `/merged` after merging the PR.", pubResult.PRURL))
+		s.State = StateWaitPublishMerge
+		setState(ctx, StateWaitPublishMerge)
 	}
+	return s
+}
+
+func runWaitPublishMerge(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	comment(ctx, s.IssueNumber, "⏳ Awaiting publish PR merge... Reply `/merged` when the PR lands.")
+	sel := workflow.NewSelector(ctx)
+	sel.AddReceive(workflow.GetSignalChannel(ctx, "PublishMergedSignal"), func(c workflow.ReceiveChannel, more bool) {
+		c.Receive(ctx, &struct{}{})
+		comment(ctx, s.IssueNumber, "🎉 Publish PR merged! Recording published article...")
+		s.State = StatePublishMerged
+	})
+	sel.AddReceive(workflow.GetSignalChannel(ctx, "AbortSignal"), func(c workflow.ReceiveChannel, more bool) {
+		c.Receive(ctx, &AbortSignal{})
+		s.State = StateAborted
+	})
+	sel.Select(ctx)
+	setState(ctx, s.State)
+	return s
+}
+
+func runPublishMerged(ctx workflow.Context, s ArticleWorkflowState) ArticleWorkflowState {
+	ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions())
+	comment(ctx, s.IssueNumber, "📝 Recording published article...")
+	_ = workflow.ExecuteActivity(ctx, "MergePublish", map[string]interface{}{
+		"slug":  s.LastDraft.Slug,
+		"title": s.LastDraft.Title,
+	}).Get(ctx, nil)
+	comment(ctx, s.IssueNumber, fmt.Sprintf("🎉 Published! https://zenn.dev/articles/%s", s.LastDraft.Slug))
+	s.State = StateCompleted
+	setState(ctx, StateCompleted)
 	return s
 }
 

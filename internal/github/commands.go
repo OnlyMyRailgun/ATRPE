@@ -49,6 +49,8 @@ func Parse(body string) (*ParsedCommand, error) {
 			Signal:  "RequestChangesSignal",
 			Payload: map[string]any{"change_notes": rest},
 		}, nil
+	case "/merged":
+		return &ParsedCommand{Signal: "PublishMergedSignal", Payload: map[string]any{}}, nil
 	default:
 		return nil, fmt.Errorf("unknown command: %s", command)
 	}

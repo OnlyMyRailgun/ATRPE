@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -219,6 +220,14 @@ func (a *WriterAgent) Run(ctx context.Context, brief artifacts.TechnicalBrief, r
 func buildFileContents(filePaths []string, workdir string) []map[string]any {
 	var result []map[string]any
 	for _, path := range filePaths {
+		// E: Reject absolute paths and traversal
+		if filepath.IsAbs(path) || strings.Contains(filepath.Clean(path), "..") {
+			result = append(result, map[string]any{
+				"path":  path,
+				"error": "unsafe path rejected",
+			})
+			continue
+		}
 		fullPath := workdir + "/" + path
 		data, err := os.ReadFile(fullPath)
 		if err != nil {
