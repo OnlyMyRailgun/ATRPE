@@ -1,6 +1,7 @@
 package activities
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,22 +15,36 @@ import (
 	"github.com/OnlyMyRailgun/ATRPE/internal/knowledge"
 )
 
+// AuditAction is the recommendation action after content audit.
+type AuditAction string
+
+const (
+	AuditKeep     AuditAction = "keep"     // write immediately — low saturation, high differentiation
+	AuditPass     AuditAction = "pass"     // writeable but not urgent
+	AuditDeepDive AuditAction = "deep_dive" // needs more research before writing
+	AuditUpdate   AuditAction = "update"   // update an existing article instead
+	AuditSkip     AuditAction = "skip"     // don't write — saturated or undifferentiable
+)
+
 // ContentAuditResult is the per-candidate audit produced by the Content Audit stage.
 type ContentAuditResult struct {
-	CandidateID     string  `json:"candidate_id"`
-	Passes          bool    `json:"passes"`
-	FailReason      string  `json:"fail_reason,omitempty"`
-	Recommendation  float64 `json:"recommendation"`   // 0..1
-	WhyNow          string  `json:"why_now"`          // why worth writing today
-	SaturationLevel string  `json:"saturation_level"` // "low"|"medium"|"high"|"saturated"
-	Differentiation string  `json:"differentiation"`  // what makes this article unique
-	ExistingGaps    string  `json:"existing_gaps"`    // what's missing in existing coverage
-	TestablePart    string  `json:"testable_part"`    // the code-verifiable component
-	Risks           string  `json:"risks"`            // what could go wrong
-	SuggestedTitle  string  `json:"suggested_title"`  // proposed article title
-	DontWriteReason string  `json:"dont_write_reason"` // reason NOT to write (or empty)
-	ExistingCount   int     `json:"existing_count"`   // approx existing articles
-	OwnOverlap      bool    `json:"own_overlap"`      // true if similar to own history
+	CandidateID     string     `json:"candidate_id"`
+	Passes          bool       `json:"passes"`
+	Action          AuditAction `json:"action"`          // keep/pass/deep_dive/update/skip
+	FailReason      string     `json:"fail_reason,omitempty"`
+	Recommendation  float64    `json:"recommendation"`   // 0..1
+	WhyNow          string     `json:"why_now"`          // why worth writing today
+	SaturationLevel string     `json:"saturation_level"` // "low"|"medium"|"high"|"saturated"
+	Differentiation string     `json:"differentiation"`  // what makes this article unique
+	ExistingGaps    string     `json:"existing_gaps"`    // what's missing in existing coverage
+	TestablePart    string     `json:"testable_part"`    // the code-verifiable component
+	Risks           string     `json:"risks"`            // what could go wrong
+	SuggestedTitle  string     `json:"suggested_title"`  // proposed article title
+	DontWriteReason string     `json:"dont_write_reason"` // reason NOT to write (or empty)
+	SimilarityScore float64    `json:"similarity_score"`  // 0..1 overlap with existing articles
+	ExistingCount   int        `json:"existing_count"`   // approx existing articles
+	OwnOverlap      bool       `json:"own_overlap"`      // true if similar to own history
+	AuditURI        string     `json:"audit_uri"`         // ObjectStore key of persisted audit scan
 }
 
 // AuditTopicsInput carries the candidates into the audit activity.
@@ -53,6 +68,7 @@ type platformSearch struct {
 
 // AuditTopics searches Zenn, Qiita, GitHub, HN, RSS, and own history for each candidate,
 // then calls the LLM to produce a structured content audit per candidate.
+// Raw scan results are persisted to ObjectStore for auditability.
 func (a *Activities) AuditTopics(ctx context.Context, input AuditTopicsInput) (*AuditTopicsResult, error) {
 	var audits []ContentAuditResult
 
@@ -65,32 +81,130 @@ func (a *Activities) AuditTopics(ctx context.Context, input AuditTopicsInput) (*
 		hnResults := searchHN(ctx, searchKeyword)
 		ownHistory := checkOwnHistory(ctx, a.Store, searchKeyword)
 
-		// Build the audit prompt with real search data
-		audit, err := a.runAuditForCandidate(ctx, c, searchKeyword, []platformSearch{
-			zennResults, qiitaResults, hnResults, ownHistory,
-		})
+		searches := []platformSearch{zennResults, qiitaResults, hnResults, ownHistory}
+
+		// Persist raw scan to ObjectStore for audit trail
+		auditURI := ""
+		if a.Objects != nil {
+			scanData := map[string]interface{}{
+				"candidate_id": c.ID,
+				"keyword":      searchKeyword,
+				"timestamp":    time.Now().UTC().Format(time.RFC3339),
+				"searches":     searches,
+			}
+			scanJSON, _ := json.Marshal(scanData)
+			key := fmt.Sprintf("content_audits/%s/%s.json", c.ID, time.Now().UTC().Format("2006-01-02"))
+			_, err := a.Objects.Put(ctx, key, bytes.NewReader(scanJSON), "application/json")
+			if err == nil {
+				auditURI = key
+			}
+		}
+
+		audit, err := a.runAuditForCandidate(ctx, c, searchKeyword, searches)
 		if err != nil {
-			// Degrade gracefully — mark as passes with a warning
+			// Degrade gracefully
 			audits = append(audits, ContentAuditResult{
-				CandidateID:    c.ID,
-				Passes:         true,
-				FailReason:     "",
-				Recommendation: 0.5,
-				WhyNow:         "Audit unavailable — fallback pass",
-				SaturationLevel: "unknown",
-				Differentiation: "",
-				ExistingGaps:    "",
-				TestablePart:    "",
-				Risks:           "Content audit failed to complete",
-				SuggestedTitle:  c.Title,
+				CandidateID: c.ID, Action: AuditPass, Passes: true,
+				Recommendation: 0.5, SaturationLevel: "unknown",
+				AuditURI: auditURI, SuggestedTitle: c.Title,
 			})
 			continue
 		}
 		audit.CandidateID = c.ID
+		audit.AuditURI = auditURI
+
+		// Compute Jaccard-like similarity using existing article titles
+		audit.SimilarityScore = computeSimilarity(c.Title, searches)
+
+		// Map passes to action if LLM didn't set one
+		if audit.Action == "" {
+			audit.Action = decideAction(audit)
+		}
+
 		audits = append(audits, audit)
 	}
 
 	return &AuditTopicsResult{Audits: audits}, nil
+}
+
+// computeSimilarity calculates a rough 0..1 overlap score between the candidate
+// title and existing articles found on each platform.
+func computeSimilarity(candidateTitle string, searches []platformSearch) float64 {
+	totalArticles := 0
+	totalOverlap := 0.0
+
+	keywords := tokenize(candidateTitle)
+	if len(keywords) == 0 {
+		return 0.0
+	}
+
+	for _, s := range searches {
+		for _, title := range s.TopTitles {
+			titleKeywords := tokenize(title)
+			intersection := intersectCount(keywords, titleKeywords)
+			union := len(keywords) + len(titleKeywords) - intersection
+			if union > 0 {
+				totalOverlap += float64(intersection) / float64(union)
+			}
+			totalArticles++
+		}
+	}
+	if totalArticles == 0 {
+		return 0.0
+	}
+	return totalOverlap / float64(totalArticles)
+}
+
+func tokenize(s string) []string {
+	var tokens []string
+	seen := make(map[string]bool)
+	for _, t := range strings.Fields(strings.ToLower(s)) {
+		t = strings.Trim(t, ".,;:'\"!?()[]{}-")
+		if len(t) > 2 && !seen[t] {
+			seen[t] = true
+			tokens = append(tokens, t)
+		}
+	}
+	return tokens
+}
+
+func intersectCount(a, b []string) int {
+	bSet := make(map[string]bool, len(b))
+	for _, v := range b {
+		bSet[v] = true
+	}
+	count := 0
+	for _, v := range a {
+		if bSet[v] {
+			count++
+		}
+	}
+	return count
+}
+
+// decideAction maps audit fields to a recommendation action.
+func decideAction(r ContentAuditResult) AuditAction {
+	if !r.Passes {
+		return AuditSkip
+	}
+	switch r.SaturationLevel {
+	case "low":
+		if r.Recommendation >= 0.7 {
+			return AuditKeep
+		}
+		return AuditPass
+	case "medium":
+		return AuditPass
+	case "high":
+		return AuditDeepDive
+	case "saturated":
+		return AuditSkip
+	default:
+		if r.OwnOverlap {
+			return AuditUpdate
+		}
+		return AuditPass
+	}
 }
 
 // extractKeyword takes a repo name like "owner/project-name" and returns "project name".
@@ -236,23 +350,31 @@ const auditSystemPrompt = `You are a technical editor for Zenn (Japanese develop
 4. **Timeliness**: Why is this worth reading TODAY? (recent release, trending, underserved niche)
 5. **Risk**: What could make this article fail? (complexity, lack of sources, too broad)
 
+## Action Decision
+- "keep" — write immediately: low saturation, high differentiation, testable
+- "pass" — writeable but not urgent: medium saturation or timing is weak
+- "deep_dive" — needs more research before writing: promising but complex
+- "update" — update an existing article instead: we have related published content
+- "skip" — don't write: saturated or undifferentiable
+
 ## Output Format
-Output a single JSON object:
 {
   "passes": true,
+  "action": "keep",
   "fail_reason": "",
   "recommendation": 0.85,
-  "why_now": "Kubernetes 1.31 just released with new Gateway API features...",
+  "similarity_score": 0.15,
+  "why_now": "...",
   "saturation_level": "low",
-  "differentiation": "Unlike existing articles that explain the API spec, we actually build and test a custom gateway controller",
-  "existing_gaps": "Existing articles are all high-level summaries. None include running code or actual benchmarks.",
-  "testable_part": "Write a Go gateway controller, test it with kind cluster, benchmark latency",
-  "risks": "Gateway API is still evolving; article may age. Mitigation: target v1.1 stable.",
-  "suggested_title": "Goで作るKubernetes Gateway Controller — コードから学ぶGateway API v1.1",
+  "differentiation": "...",
+  "existing_gaps": "...",
+  "testable_part": "...",
+  "risks": "...",
+  "suggested_title": "...",
   "dont_write_reason": ""
 }
 
-If you recommend NOT writing, set passes=false, fail_reason with WHY, and dont_write_reason with the key argument against.`
+If you recommend skipping, set passes=false, action="skip", fail_reason with WHY.`
 
 func (a *Activities) runAuditForCandidate(ctx context.Context, c artifacts.TopicCandidate, keyword string, searches []platformSearch) (ContentAuditResult, error) {
 	// Build the audit input
@@ -284,9 +406,38 @@ func (a *Activities) runAuditForCandidate(ctx context.Context, c artifacts.Topic
 	}
 
 	resp = agents.ExtractJSON(resp)
-	var audit ContentAuditResult
-	if err := json.Unmarshal([]byte(resp), &audit); err != nil {
+	var parsed struct {
+		Passes          bool    `json:"passes"`
+		Action          string  `json:"action"`
+		FailReason      string  `json:"fail_reason"`
+		Recommendation  float64 `json:"recommendation"`
+		SimilarityScore float64 `json:"similarity_score"`
+		WhyNow          string  `json:"why_now"`
+		SaturationLevel string  `json:"saturation_level"`
+		Differentiation string  `json:"differentiation"`
+		ExistingGaps    string  `json:"existing_gaps"`
+		TestablePart    string  `json:"testable_part"`
+		Risks           string  `json:"risks"`
+		SuggestedTitle  string  `json:"suggested_title"`
+		DontWriteReason string  `json:"dont_write_reason"`
+	}
+	if err := json.Unmarshal([]byte(resp), &parsed); err != nil {
 		return ContentAuditResult{}, fmt.Errorf("parse audit output: %w", err)
+	}
+
+	audit := ContentAuditResult{
+		Passes:          parsed.Passes,
+		Action:          AuditAction(parsed.Action),
+		FailReason:      parsed.FailReason,
+		Recommendation:  parsed.Recommendation,
+		WhyNow:          parsed.WhyNow,
+		SaturationLevel: parsed.SaturationLevel,
+		Differentiation: parsed.Differentiation,
+		ExistingGaps:    parsed.ExistingGaps,
+		TestablePart:    parsed.TestablePart,
+		Risks:           parsed.Risks,
+		SuggestedTitle:  parsed.SuggestedTitle,
+		DontWriteReason: parsed.DontWriteReason,
 	}
 
 	// Count total existing articles across platforms
