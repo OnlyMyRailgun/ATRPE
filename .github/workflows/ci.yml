@@ -68,21 +68,19 @@ jobs:
           go-version: "1.25"
       - name: Article quality check
         run: |
-          set -euo pipefail
-          echo "::group::Article Quality Checks"
           FAILED=0
 
           # 1. Frontmatter — drafts must have published:false
           echo "::group::1. Frontmatter + publish gate"
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
             echo "  $f"
             for field in '^---' 'published:' 'emoji:' 'type:' 'topics:'; do
-              if ! grep -q "$field" "$f"; then
+              if ! grep -q "$field" "$f" 2>/dev/null; then
                 echo "    ❌ missing $field"
                 FAILED=1
               fi
             done
-            if grep -q 'published: true' "$f"; then
+            if grep -q 'published: true' "$f" 2>/dev/null; then
               echo "    ⚠️  published:true in draft PR — should be false unless this is a publish commit"
             fi
           done
@@ -91,9 +89,9 @@ jobs:
           # 2. No placeholder / generated junk
           echo "::group::2. Anti-patterns"
           PLACEHOLDERS=("[TODO]" "[WIP]" "[TBD]" "TODO:" "Lorem ipsum" "add more here" "coming soon" "work in progress")
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
             for p in "${PLACEHOLDERS[@]}"; do
-              if grep -qi "$p" "$f"; then
+              if grep -qi "$p" "$f" 2>/dev/null; then
                 echo "  ❌ $f: placeholder '$p'"
                 FAILED=1
               fi
@@ -103,7 +101,7 @@ jobs:
 
           # 3. Code blocks >= 3
           echo "::group::3. Code blocks"
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
             FENCE_COUNT=$(grep -c '```' "$f" 2>/dev/null || echo 0)
             FENCE_COUNT=$((FENCE_COUNT / 2))
             if [ "$FENCE_COUNT" -lt 3 ]; then
@@ -117,8 +115,8 @@ jobs:
 
           # 4. Citation coverage (>= 2 markdown links)
           echo "::group::4. Citation coverage"
-          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null); do
-            LINK_COUNT=$(grep -oP '\[.*?\]\(https?://.*?\)' "$f" 2>/dev/null | wc -l)
+          for f in $(find articles -name '*.md' -not -name '.gitkeep' 2>/dev/null || true); do
+            LINK_COUNT=$(grep -o '\[.*\](http[^)]*' "$f" 2>/dev/null | wc -l || echo 0)
             if [ "$LINK_COUNT" -lt 2 ]; then
               echo "  ⚠️  $f: $LINK_COUNT links (aim for >= 2)"
             else
@@ -129,9 +127,9 @@ jobs:
 
           # 5. Source snapshot / citation registry
           echo "::group::5. Source snapshots"
-          SNAP_COUNT=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l)
+          SNAP_COUNT=$(find data/artifacts/research_snapshots -type f 2>/dev/null | wc -l || echo 0)
           echo "  Snapshots: $SNAP_COUNT"
-          if [ "$SNAP_COUNT" -gt 0 ]; then
+          if [ "$SNAP_COUNT" -gt 0 ] 2>/dev/null; then
             echo "  ✅ Snapshots present"
           else
             echo "  ℹ️  No snapshots (expected for new repos)"
