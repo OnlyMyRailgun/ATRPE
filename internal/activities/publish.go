@@ -73,18 +73,14 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 		return nil, fmt.Errorf("publish: must provide either draft or draft_id")
 	}
 
-	// Fix 1: Verify draft PR was actually merged before publishing
-	if !input.AutoMerge {
-		verified, err := a.VerifyDraftMerged(ctx, VerifyDraftMergedInput{
-			Slug:         draft.Slug,
-			ExpectedBody: draft.Body,
-		})
-		if err != nil || !verified.Merged {
-			return &PublishResult{
-				Slug:      draft.Slug,
-				Escalated: true,
-			}, fmt.Errorf("draft PR not merged: %s", verified.Reason)
-		}
+	// Fix 1: Always verify draft PR actually merged before creating publish PR.
+	// No bypass via AutoMerge. No bypass via empty repo. Hard gate.
+	verified, err := a.VerifyDraftMerged(ctx, VerifyDraftMergedInput{
+		Slug:         draft.Slug,
+		ExpectedBody: draft.Body,
+	})
+	if err != nil || !verified.Merged {
+		return nil, fmt.Errorf("draft PR not merged: %s", verified.Reason)
 	}
 
 	draft.Published = true
@@ -128,7 +124,10 @@ func (a *Activities) PublishArticle(ctx context.Context, input PublishInput) (*P
 func (a *Activities) VerifyDraftMerged(ctx context.Context, input VerifyDraftMergedInput) (*VerifyDraftMergedResult, error) {
 	repo := a.Config.GitHubIssueRepo
 	if repo == "" {
-		return &VerifyDraftMergedResult{Merged: true, Reason: "no GitHub repo configured — skip check"}, nil
+		return &VerifyDraftMergedResult{
+			Merged: false,
+			Reason: "GITHUB_ISSUE_REPO not configured — cannot verify draft PR was merged. Set the env var.",
+		}, nil
 	}
 
 	// Check main branch for articles/<slug>.md
@@ -284,14 +283,29 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 	})
 	_, _ = a.githubPost(ctx, fmt.Sprintf("https://api.github.com/repos/%s/git/refs", repo), string(createRefPayload))
 
-	// GET existing file SHA from main
+	// GET existing file SHA from main — MUST exist (draft was merged).
+	// If the file isn't on main, the draft PR was never merged — hard fail.
 	filePath := fmt.Sprintf("articles/%s.md", draft.Slug)
-	existingSHA := ""
-	existingResp, err := a.githubGet(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/%s?ref=main", repo, filePath))
-	if err == nil {
-		var existing struct{ SHA string `json:"sha"` }
-		if json.Unmarshal(existingResp, &existing) == nil {
-			existingSHA = existing.SHA
+	fileURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s?ref=main", repo, filePath)
+	existingResp, err := a.githubGet(ctx, fileURL)
+	if err != nil {
+		fmt.Printf("publish: file not found on main (draft not merged?): %v\n", err)
+		return ""
+	}
+	var existing struct {
+		SHA     string `json:"sha"`
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(existingResp, &existing) != nil {
+		return ""
+	}
+
+	// Double-check: file on main must still have published:false
+	if existing.Content != "" {
+		decoded, _ := base64.StdEncoding.DecodeString(strings.ReplaceAll(existing.Content, "\n", ""))
+		if strings.Contains(string(decoded), "published: true") || strings.Contains(string(decoded), "published:true") {
+			fmt.Printf("publish: file on main already has published:true — duplicate publish?\n")
+			return ""
 		}
 	}
 
@@ -299,9 +313,7 @@ func (a *Activities) createPublishPR(ctx context.Context, draft artifacts.Articl
 		"message": fmt.Sprintf("ATRPE: publish %s", draft.Title),
 		"content": base64.StdEncoding.EncodeToString([]byte(body)),
 		"branch":  branchName,
-	}
-	if existingSHA != "" {
-		filePayloadMap["sha"] = existingSHA
+		"sha":     existing.SHA, // always set SHA — file must exist on main
 	}
 	filePayload, _ := json.Marshal(filePayloadMap)
 	_, err = a.githubPut(ctx, fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repo, filePath), string(filePayload))
